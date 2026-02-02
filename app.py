@@ -10,22 +10,16 @@ def build_payload(user_input: str) -> dict:
 
 def main() -> None:
     st.set_page_config(page_title="API 호출 데모", page_icon="📝", layout="centered")
-    st.title("SQL Conversion AI")
+    st.title("📝 SQL Conversion AI")
     st.write("ORACLE SQL을 입력하고 PostgreSQL을 반환합니다.")
 
-    api_url = st.text_input("API URL", placeholder="https://api.example.com/endpoint")
-    example_input = (
-        "SELECT employee_id, salary\n"
-        "FROM employees\n"
-        "WHERE hire_date >= TO_DATE('2020-01-01', 'YYYY-MM-DD');"
-    )
+    api_url = st.text_input("API URL", placeholder="https://api.example.com/generate")
     user_input = st.text_area(
         "입력값 (question)",
-        placeholder="입력 SQL 혹은 변환 질문을 입력하세요.",
-        value=example_input,
+        placeholder="SELECT DECODE('A','A','1','2') FROM DUAL",
         height=160,
     )
-    st.caption("예시 입력값은 ORACLE SQL이며 /generate API의 question 필드로 전송됩니다.")
+    st.caption("입력한 ORACLE SQL은 /generate API의 question 필드로 전송됩니다.")
     timeout_seconds = st.number_input("타임아웃(초)", min_value=1, max_value=120, value=10, step=1)
 
     if st.button("API 호출", type="primary"):
