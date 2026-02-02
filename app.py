@@ -9,9 +9,9 @@ def build_payload(user_input: str) -> dict:
 
 
 def main() -> None:
-    st.set_page_config(page_title="API 호출 데모", page_icon="🔗", layout="centered")
-    st.title("API 호출 데모")
-    st.write("입력값을 전송하고 API 응답을 화면에 표시합니다.")
+    st.set_page_config(page_title="API 호출 데모", page_icon="📝", layout="centered")
+    st.title("SQL Conversion AI")
+    st.write("ORACLE SQL을 입력하고 PostgreSQL을 반환합니다.")
 
     api_url = st.text_input("API URL", placeholder="https://api.example.com/endpoint")
     user_input = st.text_area("입력값", placeholder="여기에 입력하세요", height=160)
