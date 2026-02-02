@@ -42,7 +42,7 @@ def prompt_system():
         AND  ROWNUM = 1;
     
     
-      MSSQL SQL:
+      PostgreSQL:
       SELECT
           a.col1,
           b.col2,
