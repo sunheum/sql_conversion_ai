@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import sys
 from dataclasses import dataclass
 
 import torch
@@ -61,9 +63,27 @@ class QwenSqlEncoder:
 
 
 def main() -> None:
-    model_name = "hf_models/XGenerationLab__XiYanSQL-QwenCoder-32B-2504"
-    encoder = QwenSqlEncoder(model_name)
-    question = "SELECT DECODE('A','A','1','2') FROM DUAL"
+    parser = argparse.ArgumentParser(description="Generate SQL using QwenSqlEncoder")
+    parser.add_argument(
+        "question",
+        nargs="?",
+        help="입력 SQL 혹은 변환 질문 (미지정 시 stdin에서 읽음)",
+    )
+    parser.add_argument(
+        "--model-name",
+        default="hf_models/XGenerationLab__XiYanSQL-QwenCoder-32B-2504",
+        help="사용할 모델 경로 또는 이름",
+    )
+    args = parser.parse_args()
+
+    question = args.question
+    if question is None:
+        question = sys.stdin.read().strip()
+
+    if not question:
+        raise SystemExit("질문이 비어 있습니다. 인자로 전달하거나 stdin으로 입력하세요.")
+
+    encoder = QwenSqlEncoder(args.model_name)
     response = encoder.generate(question)
     print(response)
 
