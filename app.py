@@ -95,7 +95,6 @@ def main() -> None:
     st.write("Oracle SQL을 PostgreSQL로 변환하여 DB에 저장합니다.")
 
     api_url = st.text_input("API URL", placeholder="http://localhost:8000/generate")
-    timeout_seconds = st.number_input("타임아웃(초)", min_value=1, max_value=120, value=10, step=1)
 
     st.subheader("DB 접속 정보")
     db_name = st.text_input("DB 이름", placeholder="scai")
@@ -174,7 +173,15 @@ def main() -> None:
                         ]
                         insert_source_rows(cursor, source_rows)
 
-                        for row in dataframe.itertuples(index=False):
+                        total_rows = len(dataframe.index)
+                        progress_bar = st.progress(0, text="API 호출을 준비 중입니다.")
+                        status_text = st.empty()
+
+                        for index, row in enumerate(dataframe.itertuples(index=False), start=1):
+                            status_text.info(
+                                f"API 호출 중... ({index}/{total_rows}) "
+                                f"src_obj_id={row.src_obj_id}"
+                            )
                             question = str(row.sql_modified)
                             prompt_message = build_prompt_message(question=question)
                             payload = build_payload(question)
@@ -182,7 +189,6 @@ def main() -> None:
                                 response = requests.post(
                                     api_url,
                                     json=payload,
-                                    timeout=timeout_seconds,
                                 )
                                 response.raise_for_status()
                             except requests.RequestException as exc:
@@ -198,6 +204,10 @@ def main() -> None:
                             }
                             insert_result_row(cursor, result_row)
                             result_rows.append(result_row)
+                            progress_bar.progress(index / total_rows)
+
+                        progress_bar.progress(1.0, text="API 호출이 완료되었습니다.")
+                        status_text.empty()
             finally:
                 connection.close()
 
