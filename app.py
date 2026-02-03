@@ -147,6 +147,7 @@ def main() -> None:
         errors: list[str] = []
 
         with st.spinner("DB 저장 및 API 호출 중..."):
+            connection = None
             try:
                 connection = psycopg2.connect(
                     host=db_host,
@@ -155,61 +156,62 @@ def main() -> None:
                     user=db_user,
                     password=db_password,
                 )
+                connection.autocommit = True
             except psycopg2.Error as exc:
                 st.error(f"DB 연결 실패: {exc}")
                 return
 
             try:
-                with connection:
-                    with connection.cursor() as cursor:
-                        source_rows = [
-                            (
-                                row.src_obj_id,
-                                row.sql_src,
-                                row.sql_length,
-                                row.sql_modified,
+                with connection.cursor() as cursor:
+                    source_rows = [
+                        (
+                            row.src_obj_id,
+                            row.sql_src,
+                            row.sql_length,
+                            row.sql_modified,
+                        )
+                        for row in dataframe.itertuples(index=False)
+                    ]
+                    insert_source_rows(cursor, source_rows)
+
+                    total_rows = len(dataframe.index)
+                    progress_bar = st.progress(0, text="API 호출을 준비 중입니다.")
+                    status_text = st.empty()
+
+                    for index, row in enumerate(dataframe.itertuples(index=False), start=1):
+                        status_text.info(
+                            f"API 호출 중... ({index}/{total_rows}) "
+                            f"src_obj_id={row.src_obj_id}"
+                        )
+                        question = str(row.sql_modified)
+                        prompt_message = build_prompt_message(question=question)
+                        payload = build_payload(question)
+                        try:
+                            response = requests.post(
+                                api_url,
+                                json=payload,
                             )
-                            for row in dataframe.itertuples(index=False)
-                        ]
-                        insert_source_rows(cursor, source_rows)
+                            response.raise_for_status()
+                        except requests.RequestException as exc:
+                            errors.append(f"API 호출 실패 (src_obj_id={row.src_obj_id}): {exc}")
+                            continue
 
-                        total_rows = len(dataframe.index)
-                        progress_bar = st.progress(0, text="API 호출을 준비 중입니다.")
-                        status_text = st.empty()
+                        response_text = get_response_text(response)
+                        result_row = {
+                            "src_obj_id": row.src_obj_id,
+                            "question": question,
+                            "response": response_text,
+                            "prompt_message": json.dumps(prompt_message, ensure_ascii=False),
+                        }
+                        insert_result_row(cursor, result_row)
+                        result_rows.append(result_row)
+                        progress_bar.progress(index / total_rows)
 
-                        for index, row in enumerate(dataframe.itertuples(index=False), start=1):
-                            status_text.info(
-                                f"API 호출 중... ({index}/{total_rows}) "
-                                f"src_obj_id={row.src_obj_id}"
-                            )
-                            question = str(row.sql_modified)
-                            prompt_message = build_prompt_message(question=question)
-                            payload = build_payload(question)
-                            try:
-                                response = requests.post(
-                                    api_url,
-                                    json=payload,
-                                )
-                                response.raise_for_status()
-                            except requests.RequestException as exc:
-                                errors.append(f"API 호출 실패 (src_obj_id={row.src_obj_id}): {exc}")
-                                continue
-
-                            response_text = get_response_text(response)
-                            result_row = {
-                                "src_obj_id": row.src_obj_id,
-                                "question": question,
-                                "response": response_text,
-                                "prompt_message": json.dumps(prompt_message, ensure_ascii=False),
-                            }
-                            insert_result_row(cursor, result_row)
-                            result_rows.append(result_row)
-                            progress_bar.progress(index / total_rows)
-
-                        progress_bar.progress(1.0, text="API 호출이 완료되었습니다.")
-                        status_text.empty()
+                    progress_bar.progress(1.0, text="API 호출이 완료되었습니다.")
+                    status_text.empty()
             finally:
-                connection.close()
+                if connection is not None:
+                    connection.close()
 
         if errors:
             st.warning("일부 요청이 실패했습니다.")
