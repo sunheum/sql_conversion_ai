@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from typing import Any
@@ -80,6 +81,13 @@ def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     )
 
 
+def build_template_excel_bytes() -> bytes:
+    template_df = pd.DataFrame(columns=REQUIRED_COLUMNS)
+    buffer = io.BytesIO()
+    template_df.to_excel(buffer, index=False)
+    return buffer.getvalue()
+
+
 def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="API 호출 데모", page_icon="📝", layout="centered")
@@ -102,6 +110,12 @@ def main() -> None:
     st.subheader("엑셀 업로드")
     upload_file = st.file_uploader("엑셀 파일 (.xlsx/.xls)", type=["xlsx", "xls"])
     st.caption("엑셀 컬럼: src_obj_id, sql_src, sql_length, sql_modified")
+    st.download_button(
+        label="엑셀 양식 다운로드",
+        data=build_template_excel_bytes(),
+        file_name="sql_conversion_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
     if st.button("API 호출 및 DB 저장", type="primary"):
         if not api_url:
