@@ -116,7 +116,7 @@ def main() -> None:
     else:
         st.warning(".env에서 DB Host/Port를 불러오지 못했습니다. POSTGRES_HOST/POSTGRES_PORT를 확인하세요.")
 
-    st.subheader("기능1: 데이터 불러오기")
+    st.subheader("변환 SQL 불러오기")
     data_source = st.radio(
         "데이터를 불러올 방법을 선택하세요.",
         ["엑셀 업로드", "DB에서 불러오기"],
@@ -183,7 +183,7 @@ def main() -> None:
     else:
         st.info("불러온 데이터가 없습니다.")
 
-    st.subheader("기능2: DB 저장")
+    st.subheader("DB 저장하기")
     if st.button("엑셀 데이터 DB 저장"):
         excel_df = st.session_state.get("excel_df")
         if not isinstance(excel_df, pd.DataFrame):
@@ -224,8 +224,8 @@ def main() -> None:
                     finally:
                         connection.close()
 
-    st.subheader("기능3: API 호출")
-    if st.button("API 호출", type="primary"):
+    st.subheader("SQL 변환")
+    if st.button("SQL 변환 API 호출하기", type="primary"):
         if not api_url:
             st.error("API URL을 입력하세요.")
             return
