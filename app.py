@@ -69,7 +69,7 @@ def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any, Any]]) -> No
 def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO ais_chg_item ("변경항목id", "변경전sql", "변경후sql", "프롬프트")
+        INSERT INTO scai_iv.ais_chg_item ("변경항목id", "변경전sql", "변경후sql", "프롬프트")
         VALUES (%s, %s, %s, %s)
         """,
         (
