@@ -9,7 +9,7 @@ def prompt_system():
       - 결과는 최종 SQL 문장만 출력하세요. SQL을 제외한 다른 문구는 출력하지 마세요.
       - 입력된 SQL의 구조(컬럼 순서, 테이블 구성, 별칭)는 가능한 한 유지하면서 변환하세요. 
     
-      [참고 예시]
+      #### 참고 예시
       Oracle SQL:
       SELECT A.COL1,
              B.COL2,
@@ -74,6 +74,13 @@ def prompt_system():
               FROM tab_e e
         )
       LIMIT 1;
+
+      #### FROM DUAL 변환예시
+      Oracle SQL:
+      SELECT 1 FROM DUAL; 
+
+      PostgreSQL:
+      SELECT 1;
       """
     return prompt
 
