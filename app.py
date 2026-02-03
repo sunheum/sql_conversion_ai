@@ -66,6 +66,16 @@ def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any, Any]]) -> No
     )
 
 
+def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """
+        SELECT src_obj_id, sql_src, sql_length, sql_modified
+        FROM scai_iv.ais_sql_obj_dtl
+        """,
+        connection,
+    )
+
+
 def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
@@ -106,21 +116,121 @@ def main() -> None:
     else:
         st.warning(".env에서 DB Host/Port를 불러오지 못했습니다. POSTGRES_HOST/POSTGRES_PORT를 확인하세요.")
 
-    st.subheader("엑셀 업로드")
-    upload_file = st.file_uploader("엑셀 파일 (.xlsx/.xls)", type=["xlsx", "xls"])
-    st.download_button(
-        label="엑셀 양식 다운로드",
-        data=build_template_excel_bytes(),
-        file_name="sql_conversion_template.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    st.subheader("변환 SQL 불러오기")
+    data_source = st.radio(
+        "데이터를 불러올 방법을 선택하세요.",
+        ["엑셀 업로드", "DB에서 불러오기"],
+        horizontal=True,
     )
 
-    if st.button("API 호출 및 DB 저장", type="primary"):
+    upload_file = None
+    if data_source == "엑셀 업로드":
+        upload_file = st.file_uploader("엑셀 파일 (.xlsx/.xls)", type=["xlsx", "xls"])
+        st.download_button(
+            label="엑셀 양식 다운로드",
+            data=build_template_excel_bytes(),
+            file_name="sql_conversion_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        if st.button("엑셀 데이터 불러오기"):
+            if not upload_file:
+                st.error("엑셀 파일을 업로드하세요.")
+            else:
+                try:
+                    dataframe = pd.read_excel(upload_file)
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"엑셀 파일을 읽을 수 없습니다: {exc}")
+                else:
+                    missing_columns = validate_dataframe(dataframe)
+                    if missing_columns:
+                        st.error(f"필수 컬럼이 없습니다: {', '.join(missing_columns)}")
+                    else:
+                        dataframe = dataframe[REQUIRED_COLUMNS].copy()
+                        st.session_state["loaded_df"] = dataframe
+                        st.session_state["excel_df"] = dataframe
+    else:
+        if st.button("DB 데이터 불러오기"):
+            if not db_name or not db_user or not db_password:
+                st.error("DB 접속 정보(ID/PW/DB 이름)를 입력하세요.")
+            elif not db_host or not db_port:
+                st.error("DB Host/Port 설정이 올바르지 않습니다.")
+            else:
+                try:
+                    connection = psycopg2.connect(
+                        host=db_host,
+                        port=db_port,
+                        dbname=db_name,
+                        user=db_user,
+                        password=db_password,
+                    )
+                except psycopg2.Error as exc:
+                    st.error(f"DB 연결 실패: {exc}")
+                else:
+                    try:
+                        dataframe = fetch_source_rows(connection)
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"DB 데이터 조회 실패: {exc}")
+                    else:
+                        st.session_state["loaded_df"] = dataframe
+                        st.session_state.pop("excel_df", None)
+                    finally:
+                        connection.close()
+
+    loaded_df = st.session_state.get("loaded_df")
+    if isinstance(loaded_df, pd.DataFrame):
+        st.markdown("**불러온 데이터**")
+        st.dataframe(loaded_df, use_container_width=True)
+    else:
+        st.info("불러온 데이터가 없습니다.")
+
+    st.subheader("DB 저장하기")
+    if st.button("엑셀 데이터 DB 저장"):
+        excel_df = st.session_state.get("excel_df")
+        if not isinstance(excel_df, pd.DataFrame):
+            st.error("먼저 엑셀 데이터를 불러오세요.")
+        elif not db_name or not db_user or not db_password:
+            st.error("DB 접속 정보(ID/PW/DB 이름)를 입력하세요.")
+        elif not db_host or not db_port:
+            st.error("DB Host/Port 설정이 올바르지 않습니다.")
+        else:
+            with st.spinner("엑셀 데이터를 DB에 저장 중..."):
+                try:
+                    connection = psycopg2.connect(
+                        host=db_host,
+                        port=db_port,
+                        dbname=db_name,
+                        user=db_user,
+                        password=db_password,
+                    )
+                    connection.autocommit = True
+                except psycopg2.Error as exc:
+                    st.error(f"DB 연결 실패: {exc}")
+                else:
+                    try:
+                        with connection.cursor() as cursor:
+                            source_rows = [
+                                (
+                                    row.src_obj_id,
+                                    row.sql_src,
+                                    row.sql_length,
+                                    row.sql_modified,
+                                )
+                                for row in excel_df.itertuples(index=False)
+                            ]
+                            insert_source_rows(cursor, source_rows)
+                        st.success("엑셀 데이터가 DB에 저장되었습니다.")
+                    except psycopg2.Error as exc:
+                        st.error(f"DB 저장 실패: {exc}")
+                    finally:
+                        connection.close()
+
+    st.subheader("SQL 변환")
+    if st.button("SQL 변환 API 호출하기", type="primary"):
         if not api_url:
             st.error("API URL을 입력하세요.")
             return
-        if not upload_file:
-            st.error("엑셀 파일을 업로드하세요.")
+        if not isinstance(loaded_df, pd.DataFrame):
+            st.error("먼저 데이터를 불러오세요.")
             return
         if not db_name or not db_user or not db_password:
             st.error("DB 접속 정보(ID/PW/DB 이름)를 입력하세요.")
@@ -129,25 +239,10 @@ def main() -> None:
             st.error("DB Host/Port 설정이 올바르지 않습니다.")
             return
 
-        try:
-            dataframe = pd.read_excel(upload_file)
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"엑셀 파일을 읽을 수 없습니다: {exc}")
-            return
-
-        missing_columns = validate_dataframe(dataframe)
-        if missing_columns:
-            st.error(f"필수 컬럼이 없습니다: {', '.join(missing_columns)}")
-            return
-
-        dataframe = dataframe[REQUIRED_COLUMNS].copy()
-        st.dataframe(dataframe, use_container_width=True)
-
         result_rows: list[dict[str, Any]] = []
         errors: list[str] = []
 
-        with st.spinner("DB 저장 및 API 호출 중..."):
-            connection = None
+        with st.spinner("API 호출 중..."):
             try:
                 connection = psycopg2.connect(
                     host=db_host,
@@ -163,22 +258,11 @@ def main() -> None:
 
             try:
                 with connection.cursor() as cursor:
-                    source_rows = [
-                        (
-                            row.src_obj_id,
-                            row.sql_src,
-                            row.sql_length,
-                            row.sql_modified,
-                        )
-                        for row in dataframe.itertuples(index=False)
-                    ]
-                    insert_source_rows(cursor, source_rows)
-
-                    total_rows = len(dataframe.index)
+                    total_rows = len(loaded_df.index)
                     progress_bar = st.progress(0, text="API 호출을 준비 중입니다.")
                     status_text = st.empty()
 
-                    for index, row in enumerate(dataframe.itertuples(index=False), start=1):
+                    for index, row in enumerate(loaded_df.itertuples(index=False), start=1):
                         status_text.info(
                             f"API 호출 중... ({index}/{total_rows}) "
                             f"src_obj_id={row.src_obj_id}"
@@ -210,8 +294,7 @@ def main() -> None:
                     progress_bar.progress(1.0, text="API 호출이 완료되었습니다.")
                     status_text.empty()
             finally:
-                if connection is not None:
-                    connection.close()
+                connection.close()
 
         if errors:
             st.warning("일부 요청이 실패했습니다.")
