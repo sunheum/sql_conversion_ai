@@ -59,7 +59,7 @@ def validate_dataframe(dataframe: pd.DataFrame) -> list[str]:
 def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any, Any]]) -> None:
     cursor.executemany(
         """
-        INSERT INTO ais_sql_obj_dtl (src_obj_id, sql_src, sql_length, sql_modified)
+        INSERT INTO scai_iv.ais_sql_obj_dtl (src_obj_id, sql_src, sql_length, sql_modified)
         VALUES (%s, %s, %s, %s)
         """,
         rows,
@@ -69,7 +69,7 @@ def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any, Any]]) -> No
 def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO ais_chg_item ("변경항목id", "변경전sql", "변경후sql", "프롬프트")
+        INSERT INTO scai_iv.ais_chg_item ("변경항목id", "변경전sql", "변경후sql", "프롬프트")
         VALUES (%s, %s, %s, %s)
         """,
         (
@@ -92,24 +92,23 @@ def main() -> None:
     load_dotenv()
     st.set_page_config(page_title="API 호출 데모", page_icon="📝", layout="centered")
     st.title("📝 SQL Conversion AI")
-    st.write("엑셀 업로드 데이터를 기반으로 API 호출 결과를 저장합니다.")
+    st.write("Oracle SQL을 PostgreSQL로 변환하여 DB에 저장합니다.")
 
-    api_url = st.text_input("API URL", placeholder="https://api.example.com/generate")
+    api_url = st.text_input("API URL", placeholder="http://localhost:8000/generate")
     timeout_seconds = st.number_input("타임아웃(초)", min_value=1, max_value=120, value=10, step=1)
 
     st.subheader("DB 접속 정보")
-    db_name = st.text_input("DB 이름", placeholder="postgres")
-    db_user = st.text_input("DB 사용자", placeholder="db_user")
+    db_name = st.text_input("DB 이름", placeholder="scai")
+    db_user = st.text_input("DB 사용자", placeholder="dataware")
     db_password = st.text_input("DB 비밀번호", type="password", placeholder="••••••••")
     db_host, db_port = get_db_settings()
     if db_host and db_port:
-        st.caption(f"DB Host/Port는 .env에서 로드됩니다: {db_host}:{db_port}")
+        st.caption(f"DB Host/Port는 .env에서 불러옵니다.")
     else:
         st.warning(".env에서 DB Host/Port를 불러오지 못했습니다. POSTGRES_HOST/POSTGRES_PORT를 확인하세요.")
 
     st.subheader("엑셀 업로드")
     upload_file = st.file_uploader("엑셀 파일 (.xlsx/.xls)", type=["xlsx", "xls"])
-    st.caption("엑셀 컬럼: src_obj_id, sql_src, sql_length, sql_modified")
     st.download_button(
         label="엑셀 양식 다운로드",
         data=build_template_excel_bytes(),
