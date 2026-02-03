@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 from typing import Any
 
 import pandas as pd
@@ -34,7 +35,13 @@ def get_response_text(response: requests.Response) -> str:
         except json.JSONDecodeError:
             return response.text
         if isinstance(payload, dict) and "response" in payload:
-            return str(payload["response"])
+            text = str(payload["response"])
+            text = text.lstrip()
+            text = re.sub(r"^(?:\\n)+", "", text)
+            text = text.lstrip("\n")
+            text = re.sub(r"^assistant\b[:\s]*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"^[^A-Za-z0-9_]+", "", text)
+            return text
         return json.dumps(payload, ensure_ascii=False)
     return response.text
 
