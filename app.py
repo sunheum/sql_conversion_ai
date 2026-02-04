@@ -76,7 +76,7 @@ def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any]]) -> None:
 def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
     return pd.read_sql_query(
         """
-        SELECT sql_src, sql_length, sql_modified
+        SELECT id, sql_src, sql_length, sql_modified
         FROM scai_iv.ais_sql_obj_dtl
         """,
         connection,
@@ -86,12 +86,13 @@ def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
 def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src")
-        VALUES (%s, CURRENT_TIMESTAMP, %s)
+        INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src", "src_obj_id")
+        VALUES (%s, CURRENT_TIMESTAMP, %s, %s)
         """,
         (
             1,
             row["response"],
+            row["src_obj_id"],
         ),
     )
 
@@ -286,6 +287,7 @@ def main() -> None:
                             "question": question,
                             "response": response_text,
                             "prompt_message": json.dumps(prompt_message, ensure_ascii=False),
+                            "src_obj_id": getattr(row, "id", None),
                         }
                         insert_result_row(cursor, result_row)
                         result_rows.append(result_row)
