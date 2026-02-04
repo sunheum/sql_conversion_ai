@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from prompt import prompt_system, prompt_user
 
 
-REQUIRED_COLUMNS = ["src_obj_id", "sql_src", "sql_length", "sql_modified"]
+REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
 
 
 def build_payload(user_input: str) -> dict:
@@ -63,11 +63,11 @@ def validate_dataframe(dataframe: pd.DataFrame) -> list[str]:
     return missing
 
 
-def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any, Any]]) -> None:
+def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any]]) -> None:
     cursor.executemany(
         """
-        INSERT INTO scai_iv.ais_sql_obj_dtl (src_obj_id, sql_src, sql_length, sql_modified)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO scai_iv.ais_sql_obj_dtl (sql_src, sql_length, sql_modified)
+        VALUES (%s, %s, %s)
         """,
         rows,
     )
@@ -76,7 +76,7 @@ def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any, Any]]) -> No
 def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
     return pd.read_sql_query(
         """
-        SELECT src_obj_id, sql_src, sql_length, sql_modified
+        SELECT sql_src, sql_length, sql_modified
         FROM scai_iv.ais_sql_obj_dtl
         """,
         connection,
@@ -86,14 +86,12 @@ def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
 def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO scai_iv.ais_chg_item ("변경항목id", "변경전sql", "변경후sql", "프롬프트")
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src")
+        VALUES (%s, CURRENT_TIMESTAMP, %s)
         """,
         (
-            row["src_obj_id"],
-            row["question"],
+            1,
             row["response"],
-            row["prompt_message"],
         ),
     )
 
@@ -217,7 +215,6 @@ def main() -> None:
                         with connection.cursor() as cursor:
                             source_rows = [
                                 (
-                                    row.src_obj_id,
                                     row.sql_src,
                                     row.sql_length,
                                     row.sql_modified,
@@ -270,10 +267,7 @@ def main() -> None:
                     status_text = st.empty()
 
                     for index, row in enumerate(loaded_df.itertuples(index=False), start=1):
-                        status_text.info(
-                            f"API 호출 중... ({index}/{total_rows}) "
-                            f"src_obj_id={row.src_obj_id}"
-                        )
+                        status_text.info(f"API 호출 중... ({index}/{total_rows})")
                         question = str(row.sql_modified)
                         prompt_message = build_prompt_message(question=question)
                         payload = build_payload(question)
@@ -284,12 +278,11 @@ def main() -> None:
                             )
                             response.raise_for_status()
                         except requests.RequestException as exc:
-                            errors.append(f"API 호출 실패 (src_obj_id={row.src_obj_id}): {exc}")
+                            errors.append(f"API 호출 실패 (row {index}): {exc}")
                             continue
 
                         response_text = get_response_text(response)
                         result_row = {
-                            "src_obj_id": row.src_obj_id,
                             "question": question,
                             "response": response_text,
                             "prompt_message": json.dumps(prompt_message, ensure_ascii=False),
