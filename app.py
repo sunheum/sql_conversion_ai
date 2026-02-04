@@ -284,10 +284,9 @@ def main() -> None:
 
                         response_text = get_response_text(response)
                         result_row = {
+                            "src_obj_id": getattr(row, "id", None),
                             "question": question,
                             "response": response_text,
-                            "prompt_message": json.dumps(prompt_message, ensure_ascii=False),
-                            "src_obj_id": getattr(row, "id", None),
                         }
                         insert_result_row(cursor, result_row)
                         result_rows.append(result_row)
