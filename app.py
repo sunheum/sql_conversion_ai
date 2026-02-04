@@ -39,7 +39,7 @@ def get_response_text(response: requests.Response) -> str:
             text = text.lstrip()
             text = re.sub(r"^(?:\\n)+", "", text)
             text = text.lstrip("\n")
-            text = re.sub(r"^assistant\b", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"(?i)^\s*assistant\s*", "", text, flags=re.IGNORECASE)
             text = re.sub(r"^[^A-Za-z0-9_]+", "", text)
             return text
         return json.dumps(payload, ensure_ascii=False)
