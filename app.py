@@ -39,11 +39,24 @@ def get_response_text(response: requests.Response) -> str:
             text = text.lstrip()
             text = re.sub(r"^(?:\\n)+", "", text)
             text = text.lstrip("\n")
-            text = re.sub(r"^assistant\b", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"(?i)^\s*assistant\s*", "", text, flags=re.IGNORECASE)
             text = re.sub(r"^[^A-Za-z0-9_]+", "", text)
             return text
         return json.dumps(payload, ensure_ascii=False)
     return response.text
+
+
+def fetch_response_text(api_url: str, payload: dict, max_retries: int = 2) -> str:
+    attempts = 0
+    last_response_text = ""
+    while attempts <= max_retries:
+        response = requests.post(api_url, json=payload)
+        response.raise_for_status()
+        last_response_text = get_response_text(response)
+        if last_response_text.strip():
+            return last_response_text
+        attempts += 1
+    return last_response_text
 
 
 def get_db_settings() -> tuple[str | None, int | None]:
@@ -76,7 +89,7 @@ def insert_source_rows(cursor: Any, rows: list[tuple[Any, Any, Any]]) -> None:
 def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
     return pd.read_sql_query(
         """
-        SELECT sql_src, sql_length, sql_modified
+        SELECT id, sql_src, sql_length, sql_modified
         FROM scai_iv.ais_sql_obj_dtl
         """,
         connection,
@@ -86,12 +99,13 @@ def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
 def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src")
-        VALUES (%s, CURRENT_TIMESTAMP, %s)
+        INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src", "src_obj_id")
+        VALUES (%s, CURRENT_TIMESTAMP, %s, %s)
         """,
         (
             1,
             row["response"],
+            row["src_obj_id"],
         ),
     )
 
@@ -272,20 +286,14 @@ def main() -> None:
                         prompt_message = build_prompt_message(question=question)
                         payload = build_payload(question)
                         try:
-                            response = requests.post(
-                                api_url,
-                                json=payload,
-                            )
-                            response.raise_for_status()
+                            response_text = fetch_response_text(api_url, payload)
                         except requests.RequestException as exc:
                             errors.append(f"API 호출 실패 (row {index}): {exc}")
                             continue
-
-                        response_text = get_response_text(response)
                         result_row = {
+                            "src_obj_id": getattr(row, "id", None),
                             "question": question,
                             "response": response_text,
-                            "prompt_message": json.dumps(prompt_message, ensure_ascii=False),
                         }
                         insert_result_row(cursor, result_row)
                         result_rows.append(result_row)
