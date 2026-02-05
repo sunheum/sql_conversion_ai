@@ -10,7 +10,7 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from prompt import prompt_system, prompt_user
+from prompt import prompt_trans_system, prompt_trans_user
 
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
@@ -22,8 +22,8 @@ def build_payload(user_input: str) -> dict:
 
 def build_prompt_message(question: str) -> list[dict[str, str]]:
     return [
-        {"role": "system", "content": prompt_system()},
-        {"role": "user", "content": prompt_user(question=question)},
+        {"role": "system", "content": prompt_trans_system()},
+        {"role": "user", "content": prompt_trans_user(question=question)},
     ]
 
 
