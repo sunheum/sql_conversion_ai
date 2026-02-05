@@ -46,6 +46,19 @@ def get_response_text(response: requests.Response) -> str:
     return response.text
 
 
+def fetch_response_text(api_url: str, payload: dict, max_retries: int = 2) -> str:
+    attempts = 0
+    last_response_text = ""
+    while attempts <= max_retries:
+        response = requests.post(api_url, json=payload)
+        response.raise_for_status()
+        last_response_text = get_response_text(response)
+        if last_response_text.strip():
+            return last_response_text
+        attempts += 1
+    return last_response_text
+
+
 def get_db_settings() -> tuple[str | None, int | None]:
     host = os.getenv("POSTGRES_HOST")
     port_value = os.getenv("POSTGRES_PORT")
@@ -273,16 +286,10 @@ def main() -> None:
                         prompt_message = build_prompt_message(question=question)
                         payload = build_payload(question)
                         try:
-                            response = requests.post(
-                                api_url,
-                                json=payload,
-                            )
-                            response.raise_for_status()
+                            response_text = fetch_response_text(api_url, payload)
                         except requests.RequestException as exc:
                             errors.append(f"API 호출 실패 (row {index}): {exc}")
                             continue
-
-                        response_text = get_response_text(response)
                         result_row = {
                             "src_obj_id": getattr(row, "id", None),
                             "question": question,
