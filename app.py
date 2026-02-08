@@ -27,23 +27,29 @@ def build_prompt_message(question: str) -> list[dict[str, str]]:
     ]
 
 
+def clean_response_text(text: str) -> str:
+    if not text:
+        return text
+    cleaned = text.lstrip("\ufeff").lstrip()
+    cleaned = re.sub(r"^(?:\\n)+", "", cleaned)
+    cleaned = cleaned.lstrip("\n")
+    cleaned = re.sub(r"(?i)^\s*assistant[:\s]*", "", cleaned)
+    cleaned = re.sub(r"^[^A-Za-z0-9_]+", "", cleaned)
+    return cleaned
+
+
 def get_response_text(response: requests.Response) -> str:
     content_type = response.headers.get("Content-Type", "")
     if "application/json" in content_type:
         try:
             payload = response.json()
         except json.JSONDecodeError:
-            return response.text
+            return clean_response_text(response.text)
         if isinstance(payload, dict) and "response" in payload:
             text = str(payload["response"])
-            text = text.lstrip()
-            text = re.sub(r"^(?:\\n)+", "", text)
-            text = text.lstrip("\n")
-            text = re.sub(r"(?i)^\s*assistant\s*", "", text, flags=re.IGNORECASE)
-            text = re.sub(r"^[^A-Za-z0-9_]+", "", text)
-            return text
+            return clean_response_text(text)
         return json.dumps(payload, ensure_ascii=False)
-    return response.text
+    return clean_response_text(response.text)
 
 
 def fetch_response_text(api_url: str, payload: dict, max_retries: int = 2) -> str:
