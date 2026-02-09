@@ -30,12 +30,17 @@ def build_prompt_message(question: str) -> list[dict[str, str]]:
 def clean_response_text(text: str) -> str:
     if not text:
         return text
+    original = text
     cleaned = text.lstrip("\ufeff").lstrip()
     cleaned = re.sub(r"^(?:\\n)+", "", cleaned)
     cleaned = cleaned.lstrip("\n")
     cleaned = re.sub(r"(?i)^\s*assistant[:\s]*", "", cleaned)
-    cleaned = re.sub(r"^[^A-Za-z0-9_]+", "", cleaned)
-    return cleaned
+    cleaned = re.sub(r"^```(?:\w+)?\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.strip()
+    if cleaned:
+        return cleaned
+    return original.strip()
 
 
 def get_response_text(response: requests.Response) -> str:
