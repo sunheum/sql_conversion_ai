@@ -10,50 +10,32 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from models import DEFAULT_MODEL_LABEL, MODEL_CHOICES
+from prompt import prompt_trans_system, prompt_trans_user
 
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
 
 
-def build_payload(
-    user_input: str,
-    model_label: str,
-    max_new_tokens: int,
-    temperature: float,
-    top_p: float,
-    top_k: int,
-    repetition_penalty: float,
-    do_sample: bool,
-) -> dict:
-    return {
-        "question": user_input,
-        "model_label": model_label,
-        "max_new_tokens": max_new_tokens,
-        "temperature": temperature,
-        "top_p": top_p,
-        "top_k": top_k,
-        "repetition_penalty": repetition_penalty,
-        "do_sample": do_sample,
-    }
+def build_payload(user_input: str) -> dict:
+    return {"question": user_input}
 
 
+def build_prompt_message(question: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": prompt_trans_system()},
+        {"role": "user", "content": prompt_trans_user(question=question)},
+    ]
 
 
 def clean_response_text(text: str) -> str:
     if not text:
         return text
-    original = text
     cleaned = text.lstrip("\ufeff").lstrip()
     cleaned = re.sub(r"^(?:\\n)+", "", cleaned)
     cleaned = cleaned.lstrip("\n")
     cleaned = re.sub(r"(?i)^\s*assistant[:\s]*", "", cleaned)
-    cleaned = re.sub(r"^```(?:\w+)?\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    cleaned = cleaned.strip()
-    if cleaned:
-        return cleaned
-    return original.strip()
+    cleaned = re.sub(r"^[^A-Za-z0-9_]+", "", cleaned)
+    return cleaned
 
 
 def get_response_text(response: requests.Response) -> str:
@@ -226,24 +208,6 @@ def main() -> None:
     else:
         st.info("불러온 데이터가 없습니다.")
 
-
-    st.subheader("모델 설정")
-    model_label = st.selectbox(
-        "모델 선택",
-        options=list(MODEL_CHOICES.keys()),
-        index=list(MODEL_CHOICES.keys()).index(DEFAULT_MODEL_LABEL),
-    )
-
-    col1, col2 = st.columns(2)
-    with col1:
-        max_new_tokens = st.number_input("max_new_tokens", min_value=1, max_value=2048, value=1024, step=1)
-        temperature = st.slider("temperature", min_value=0.0, max_value=2.0, value=0.1, step=0.05)
-        top_p = st.slider("top_p", min_value=0.0, max_value=1.0, value=0.8, step=0.05)
-    with col2:
-        top_k = st.number_input("top_k", min_value=1, max_value=200, value=20, step=1)
-        repetition_penalty = st.slider("repetition_penalty", min_value=1.0, max_value=2.0, value=1.05, step=0.01)
-        do_sample = st.checkbox("do_sample", value=True)
-
     st.subheader("DB 저장하기")
     if st.button("엑셀 데이터 DB 저장"):
         excel_df = st.session_state.get("excel_df")
@@ -325,16 +289,8 @@ def main() -> None:
                     for index, row in enumerate(loaded_df.itertuples(index=False), start=1):
                         status_text.info(f"API 호출 중... ({index}/{total_rows})")
                         question = str(row.sql_modified)
-                        payload = build_payload(
-                            user_input=question,
-                            model_label=model_label,
-                            max_new_tokens=max_new_tokens,
-                            temperature=temperature,
-                            top_p=top_p,
-                            top_k=top_k,
-                            repetition_penalty=repetition_penalty,
-                            do_sample=do_sample,
-                        )
+                        prompt_message = build_prompt_message(question=question)
+                        payload = build_payload(question)
                         try:
                             response_text = fetch_response_text(api_url, payload)
                         except requests.RequestException as exc:

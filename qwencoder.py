@@ -13,8 +13,6 @@ class GenerationConfig:
     max_new_tokens: int = 1024
     temperature: float = 0.1
     top_p: float = 0.8
-    top_k: int = 20
-    repetition_penalty: float = 1.05
     do_sample: bool = True
 
 
@@ -53,8 +51,6 @@ class QwenSqlEncoder:
             max_new_tokens=config.max_new_tokens,
             temperature=config.temperature,
             top_p=config.top_p,
-            top_k=config.top_k,
-            repetition_penalty=config.repetition_penalty,
             do_sample=config.do_sample,
         )
         generated_ids = [
