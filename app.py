@@ -10,7 +10,6 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from models import DEFAULT_MODEL_LABEL, MODEL_CHOICES
 
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
@@ -18,7 +17,6 @@ REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
 
 def build_payload(
     user_input: str,
-    model_label: str,
     max_new_tokens: int,
     temperature: float,
     top_p: float,
@@ -28,7 +26,6 @@ def build_payload(
 ) -> dict:
     return {
         "question": user_input,
-        "model_label": model_label,
         "max_new_tokens": max_new_tokens,
         "temperature": temperature,
         "top_p": top_p,
@@ -226,14 +223,6 @@ def main() -> None:
     else:
         st.info("불러온 데이터가 없습니다.")
 
-
-    st.subheader("모델 설정")
-    model_label = st.selectbox(
-        "모델 선택",
-        options=list(MODEL_CHOICES.keys()),
-        index=list(MODEL_CHOICES.keys()).index(DEFAULT_MODEL_LABEL),
-    )
-
     col1, col2 = st.columns(2)
     with col1:
         max_new_tokens = st.number_input("max_new_tokens", min_value=1, max_value=2048, value=1024, step=1)
@@ -327,7 +316,6 @@ def main() -> None:
                         question = str(row.sql_modified)
                         payload = build_payload(
                             user_input=question,
-                            model_label=model_label,
                             max_new_tokens=max_new_tokens,
                             temperature=temperature,
                             top_p=top_p,
