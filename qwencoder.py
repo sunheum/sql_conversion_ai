@@ -40,7 +40,7 @@ class QwenSqlEncoder:
         text = self.tokenizer.apply_chat_template(
             message,
             tokenize=False,
-            add_generation_prompt=False,
+            add_generation_prompt=True,
         )
         model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
 
