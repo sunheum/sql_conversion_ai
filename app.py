@@ -10,21 +10,12 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 
-from prompt import prompt_trans_system, prompt_trans_user
-
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
 
 
 def build_payload(user_input: str) -> dict:
     return {"question": user_input}
-
-
-def build_prompt_message(question: str) -> list[dict[str, str]]:
-    return [
-        {"role": "system", "content": prompt_trans_system()},
-        {"role": "user", "content": prompt_trans_user(question=question)},
-    ]
 
 
 def clean_response_text(text: str) -> str:
@@ -289,7 +280,6 @@ def main() -> None:
                     for index, row in enumerate(loaded_df.itertuples(index=False), start=1):
                         status_text.info(f"API 호출 중... ({index}/{total_rows})")
                         question = str(row.sql_modified)
-                        prompt_message = build_prompt_message(question=question)
                         payload = build_payload(question)
                         try:
                             response_text = fetch_response_text(api_url, payload)
