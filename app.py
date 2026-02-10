@@ -18,6 +18,10 @@ def build_payload(user_input: str) -> dict:
     return {"question": user_input}
 
 
+def build_verify_payload(oracle_sql: str, pg_sql: str) -> dict:
+    return {"oracle_sql": oracle_sql, "pg_sql": pg_sql}
+
+
 def clean_response_text(text: str) -> str:
     if not text:
         return text
@@ -88,6 +92,17 @@ def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
         """
         SELECT id, sql_src, sql_length, sql_modified
         FROM scai_iv.ais_sql_obj_dtl
+        """,
+        connection,
+    )
+
+
+def fetch_verify_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """
+        SELECT d.id, d.sql_modified, r.new_sql_src
+        FROM scai_iv.ais_sql_obj_dtl AS d
+        JOIN scai_iv.ais_chg_rslt AS r ON d.id = r.src_obj_id
         """,
         connection,
     )
@@ -310,6 +325,85 @@ def main() -> None:
             st.dataframe(pd.DataFrame(result_rows), use_container_width=True)
         else:
             st.info("저장된 결과가 없습니다.")
+
+    st.subheader("SQL 검증")
+    verify_api_url = st.text_input("검증 API URL", placeholder="http://localhost:8000/verify")
+    if st.button("SQL 검증 API 호출하기"):
+        if not verify_api_url:
+            st.error("검증 API URL을 입력하세요.")
+            return
+        if not db_name or not db_user or not db_password:
+            st.error("DB 접속 정보(ID/PW/DB 이름)를 입력하세요.")
+            return
+        if not db_host or not db_port:
+            st.error("DB Host/Port 설정이 올바르지 않습니다.")
+            return
+
+        verify_rows: list[dict[str, Any]] = []
+        errors: list[str] = []
+
+        with st.spinner("검증 API 호출 중..."):
+            try:
+                connection = psycopg2.connect(
+                    host=db_host,
+                    port=db_port,
+                    dbname=db_name,
+                    user=db_user,
+                    password=db_password,
+                )
+                verify_df = fetch_verify_rows(connection)
+            except psycopg2.Error as exc:
+                st.error(f"DB 연결/조회 실패: {exc}")
+                return
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"검증 대상 조회 실패: {exc}")
+                return
+            finally:
+                if "connection" in locals():
+                    connection.close()
+
+            if verify_df.empty:
+                st.info("검증 대상 데이터가 없습니다.")
+                return
+
+            total_rows = len(verify_df.index)
+            progress_bar = st.progress(0, text="검증 API 호출을 준비 중입니다.")
+            status_text = st.empty()
+
+            for index, row in enumerate(verify_df.itertuples(index=False), start=1):
+                status_text.info(f"검증 API 호출 중... ({index}/{total_rows})")
+                payload = build_verify_payload(
+                    oracle_sql=str(row.sql_modified),
+                    pg_sql=str(row.new_sql_src),
+                )
+                try:
+                    response_text = fetch_response_text(verify_api_url, payload)
+                except requests.RequestException as exc:
+                    errors.append(f"검증 API 호출 실패 (row {index}, id {row.id}): {exc}")
+                    continue
+
+                verify_rows.append(
+                    {
+                        "id": row.id,
+                        "oracle_sql": row.sql_modified,
+                        "pg_sql": row.new_sql_src,
+                        "verify_result": response_text,
+                    }
+                )
+                progress_bar.progress(index / total_rows)
+
+            progress_bar.progress(1.0, text="검증 API 호출이 완료되었습니다.")
+            status_text.empty()
+
+        if errors:
+            st.warning("일부 검증 요청이 실패했습니다.")
+            for error in errors:
+                st.write(f"- {error}")
+
+        if verify_rows:
+            st.dataframe(pd.DataFrame(verify_rows), use_container_width=True)
+        else:
+            st.info("검증 결과가 없습니다.")
 
 
 if __name__ == "__main__":
