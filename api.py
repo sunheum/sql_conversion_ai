@@ -5,6 +5,7 @@ from functools import lru_cache
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
+from prompt import prompt_trans_system, prompt_trans_user
 from qwencoder import GenerationConfig, QwenSqlEncoder
 
 
@@ -32,7 +33,11 @@ def get_encoder() -> QwenSqlEncoder:
 @app.post("/generate", response_model=GenerateResponse)
 def generate_sql(payload: GenerateRequest) -> GenerateResponse:
     encoder = get_encoder()
+    system_prompt = prompt_trans_system()
+    user_prompt = prompt_trans_user(question=payload.question)
     config = GenerationConfig(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
         max_new_tokens=payload.max_new_tokens,
         temperature=payload.temperature,
         top_p=payload.top_p,
