@@ -22,5 +22,5 @@ Example request:
 ```bash
 curl -X POST http://localhost:8000/generate \
   -H "Content-Type: application/json" \
-  -d '{"question":"SELECT DECODE('"'"'A'"'"','"'"'A'"'"','"'"'1'"'"','"'"'2'"'"') FROM DUAL"}'
+  -d '{"question":"SELECT DECODE('A','A','1','2') FROM DUAL"}'
 ```
