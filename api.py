@@ -5,7 +5,12 @@ from functools import lru_cache
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from prompt import prompt_trans_system, prompt_trans_user
+from prompt import (
+    prompt_trans_system,
+    prompt_trans_user,
+    prompt_varify_system,
+    prompt_varify_user,
+)
 from qwencoder import GenerationConfig, QwenSqlEncoder
 
 
@@ -19,6 +24,15 @@ class GenerateRequest(BaseModel):
 
 class GenerateResponse(BaseModel):
     response: str
+
+
+class VerifyRequest(BaseModel):
+    oracle_sql: str = Field(..., description="원본 Oracle SQL")
+    pg_sql: str = Field(..., description="변환된 PostgreSQL SQL")
+    max_new_tokens: int = Field(1024, ge=1, le=2048)
+    temperature: float = Field(0.1, ge=0.0, le=2.0)
+    top_p: float = Field(0.8, ge=0.0, le=1.0)
+    do_sample: bool = True
 
 
 app = FastAPI(title="Qwen SQL Encoder API")
@@ -44,4 +58,21 @@ def generate_sql(payload: GenerateRequest) -> GenerateResponse:
         do_sample=payload.do_sample,
     )
     output = encoder.generate(payload.question, config=config)
+    return GenerateResponse(response=output)
+
+
+@app.post("/verify", response_model=GenerateResponse)
+def verify_sql(payload: VerifyRequest) -> GenerateResponse:
+    encoder = get_encoder()
+    system_prompt = prompt_varify_system()
+    user_prompt = prompt_varify_user(oracle_sql=payload.oracle_sql, pg_sql=payload.pg_sql)
+    config = GenerationConfig(
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        max_new_tokens=payload.max_new_tokens,
+        temperature=payload.temperature,
+        top_p=payload.top_p,
+        do_sample=payload.do_sample,
+    )
+    output = encoder.generate(payload.oracle_sql, config=config)
     return GenerateResponse(response=output)
