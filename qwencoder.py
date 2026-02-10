@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from prompt import prompt_trans_system, prompt_trans_user
 
 
 @dataclass(frozen=True)
@@ -14,6 +13,8 @@ class GenerationConfig:
     temperature: float = 0.1
     top_p: float = 0.8
     do_sample: bool = True
+    user_prompt: str | None = None
+    system_prompt: str | None = None
 
 
 class QwenSqlEncoder:
@@ -30,8 +31,8 @@ class QwenSqlEncoder:
         if config is None:
             config = GenerationConfig()
 
-        system_prompt = prompt_trans_system()
-        user_prompt = prompt_trans_user(question=question)
+        system_prompt = config.system_prompt or ""
+        user_prompt = config.user_prompt or question
         message = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
