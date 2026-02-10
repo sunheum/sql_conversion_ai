@@ -31,8 +31,8 @@ class QwenSqlEncoder:
         if config is None:
             config = GenerationConfig()
 
-        system_prompt = config.system_prompt or ""
-        user_prompt = config.user_prompt or question
+        system_prompt = config.system_prompt
+        user_prompt = config.user_prompt
         message = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
