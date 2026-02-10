@@ -99,7 +99,7 @@ def prompt_trans_system():
 
 def prompt_trans_user(question):
     prompt = f"""
-        ORACLE SQL:
+        Oracle SQL:
         {question}
 
         PostgreSQL:
@@ -109,6 +109,29 @@ def prompt_trans_user(question):
 
 def prompt_varify_system():
     prompt = """
-        당신은 SQL 전문가이며, 주어진 PostgreSQL(버전 15)
+        당신은 SQL 전문가입니다. 
+        주어진 PostgreSQL(버전 15)은 Oracle SQL을 변환한 것입니다.
+        당신은 PostgreSQL이 잘 변환되었는지 아래 Rule을 기반으로 검증합니다.
+
+        ## Rule
+        - Oracle SQL에 사용된 절(SELECT, FROM, WHERE, GROUP BY, HAVING, ORDER BY 등)이 PostgreSQL에 모두 존재해야 한다.
+        - 각 절의 컬럼, 테이블, 조건이 누락되지 않아야 한다.
+        - 각 쿼리의 논리적 의미가 동일해야 한다.
+
+        ## Output Fromat
+        - 검증 결과 잘 변환된 경우:
+            {"result": "0", "reason": ""}
+        - 검증 결과 잘못 변환된 경우:
+            {"result": "1", "reason": "이곳에 잘못 변환된 이유를 간단히 입력합니다."}
+    """
+    return prompt
+
+def prompt_varify_user(oracle_sql, pg_sql):
+    prompt = f"""
+        Oracle SQL:
+        {oracle_sql}
+
+        PostgreSQL:
+        {pg_sql}
     """
     return prompt
