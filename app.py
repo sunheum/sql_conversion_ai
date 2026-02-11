@@ -121,7 +121,7 @@ def upsert_result_row(cursor: Any, row: dict[str, Any]) -> None:
         (
             1,
             row["response"],
-            row["src_obj_id"],
+            str(row["src_obj_id"]),
         ),
     )
 
@@ -134,7 +134,7 @@ def upsert_result_row(cursor: Any, row: dict[str, Any]) -> None:
             (
                 1,
                 row["response"],
-                row["src_obj_id"],
+                str(row["src_obj_id"]),
             ),
         )
 
