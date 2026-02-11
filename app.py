@@ -102,7 +102,7 @@ def fetch_verify_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
         """
         SELECT d.id, d.sql_modified, r.new_sql_src
         FROM scai_iv.ais_sql_obj_dtl AS d
-        JOIN scai_iv.ais_chg_rslt AS r ON d.id = r.src_obj_id
+        JOIN scai_iv.ais_chg_rslt AS r ON d.id = CAST(r.src_obj_id AS INTEGER);
         """,
         connection,
     )
@@ -328,7 +328,7 @@ def main() -> None:
 
     st.subheader("SQL 검증")
     verify_api_url = st.text_input("검증 API URL", placeholder="http://localhost:8000/verify")
-    if st.button("SQL 검증 API 호출하기"):
+    if st.button("SQL 검증 API 호출하기", type="primary"):
         if not verify_api_url:
             st.error("검증 API URL을 입력하세요.")
             return
