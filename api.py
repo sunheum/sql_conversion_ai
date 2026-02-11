@@ -16,6 +16,8 @@ from qwencoder import GenerationConfig, QwenSqlEncoder
 
 class GenerateRequest(BaseModel):
     question: str = Field(..., description="입력 SQL 혹은 변환 질문")
+    system_prompt: str | None = Field(None, description="시스템 프롬프트(미입력 시 기본 프롬프트 사용)")
+    user_prompt: str | None = Field(None, description="유저 프롬프트(미입력 시 question 기반 기본 프롬프트 사용)")
     max_new_tokens: int = Field(1024, ge=1, le=2048)
     temperature: float = Field(0.1, ge=0.0, le=2.0)
     top_p: float = Field(0.8, ge=0.0, le=1.0)
@@ -47,8 +49,8 @@ def get_encoder() -> QwenSqlEncoder:
 @app.post("/generate", response_model=GenerateResponse)
 def generate_sql(payload: GenerateRequest) -> GenerateResponse:
     encoder = get_encoder()
-    system_prompt = prompt_trans_system()
-    user_prompt = prompt_trans_user(question=payload.question)
+    system_prompt = payload.system_prompt or prompt_trans_system()
+    user_prompt = payload.user_prompt or prompt_trans_user(question=payload.question)
     config = GenerationConfig(
         system_prompt=system_prompt,
         user_prompt=user_prompt,

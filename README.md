@@ -24,3 +24,15 @@ curl -X POST http://localhost:8000/generate \
   -H "Content-Type: application/json" \
   -d '{"question":"SELECT DECODE('A','A','1','2') FROM DUAL"}'
 ```
+
+Optional prompts can also be provided. If omitted, the API keeps the current default prompt behavior.
+
+```bash
+curl -X POST http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question":"SELECT * FROM EMP",
+    "system_prompt":"You are a SQL expert.",
+    "user_prompt":"Convert this Oracle SQL to PostgreSQL syntax only."
+  }'
+```
