@@ -108,11 +108,15 @@ def fetch_verify_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
     )
 
 
-def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
+def upsert_result_row(cursor: Any, row: dict[str, Any]) -> None:
     cursor.execute(
         """
-        INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src", "src_obj_id")
-        VALUES (%s, CURRENT_TIMESTAMP, %s, %s)
+        UPDATE scai_iv.ais_chg_rslt
+        SET
+            "변경수행차수" = %s,
+            "변경수행일시" = CURRENT_TIMESTAMP,
+            "new_sql_src" = %s
+        WHERE "src_obj_id" = %s
         """,
         (
             1,
@@ -120,6 +124,19 @@ def insert_result_row(cursor: Any, row: dict[str, Any]) -> None:
             row["src_obj_id"],
         ),
     )
+
+    if cursor.rowcount == 0:
+        cursor.execute(
+            """
+            INSERT INTO scai_iv.ais_chg_rslt ("변경수행차수", "변경수행일시", "new_sql_src", "src_obj_id")
+            VALUES (%s, CURRENT_TIMESTAMP, %s, %s)
+            """,
+            (
+                1,
+                row["response"],
+                row["src_obj_id"],
+            ),
+        )
 
 
 def build_template_excel_bytes() -> bytes:
@@ -306,7 +323,7 @@ def main() -> None:
                             "question": question,
                             "response": response_text,
                         }
-                        insert_result_row(cursor, result_row)
+                        upsert_result_row(cursor, result_row)
                         result_rows.append(result_row)
                         progress_bar.progress(index / total_rows)
 
