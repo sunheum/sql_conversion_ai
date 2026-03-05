@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ NON_QUERY_KEYWORDS = {
 ORACLE_XML_DIR = Path("./data/oracle/")
 EXPORTED_SQL_DIR = Path("./data/oracle/_exported_sql/")
 PARTS_OUT_DIR = Path("./out_parts/")
+SQL_SPLIT_THRESHOLD = 2500
 
 
 def build_payload(user_input: str) -> dict:
@@ -298,7 +300,7 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
         st.info("아직 로드된 SQL이 없습니다.")
 
     st.subheader("3. SQL 분할")
-    st.caption("./out_parts/{sql파일명}/ 폴더에 저장합니다.")
+    st.caption(f"SQL 길이 {SQL_SPLIT_THRESHOLD}자 이상은 분할하고, 미만은 단일 파일로 ./out_parts/{{sql파일명}}/ 폴더에 저장합니다.")
 
     if st.button("SQL 분할 실행"):
         sql_items = st.session_state.get("preprocess_sql_only", [])
@@ -308,22 +310,44 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
 
         PARTS_OUT_DIR.mkdir(parents=True, exist_ok=True)
         success_count = 0
+        split_count = 0
+        single_file_count = 0
         fail_messages: list[str] = []
 
         for item in sql_items:
             base_name = Path(item["name"]).stem
             target_dir = PARTS_OUT_DIR / base_name
             target_dir.mkdir(parents=True, exist_ok=True)
-            temp_input = target_dir / f"{base_name}.sql"
-            temp_input.write_text(item["sql_text"], encoding="utf-8")
+            sql_text = item["sql_text"]
 
             try:
-                split_sql_file(str(temp_input), str(target_dir), dialect="oracle", max_chars=1000, min_depth_to_extract=2)
+                if len(sql_text) >= SQL_SPLIT_THRESHOLD:
+                    with tempfile.NamedTemporaryFile(mode="w", suffix=".sql", encoding="utf-8", delete=False) as temp_file:
+                        temp_file.write(sql_text)
+                        temp_input_path = temp_file.name
+
+                    try:
+                        split_sql_file(
+                            temp_input_path,
+                            str(target_dir),
+                            dialect="oracle",
+                            max_chars=1000,
+                            min_depth_to_extract=2,
+                        )
+                    finally:
+                        Path(temp_input_path).unlink(missing_ok=True)
+                    split_count += 1
+                else:
+                    single_output_path = target_dir / f"{base_name}.sql"
+                    single_output_path.write_text(sql_text, encoding="utf-8")
+                    single_file_count += 1
                 success_count += 1
             except Exception as exc:  # noqa: BLE001
                 fail_messages.append(f"{item['name']}: {exc}")
 
-        st.success(f"SQL 분할 완료: {success_count}건")
+        st.success(
+            f"SQL 분할 완료: {success_count}건 (분할 저장 {split_count}건 / 단일 파일 저장 {single_file_count}건)"
+        )
         if fail_messages:
             st.warning("일부 SQL 분할이 실패했습니다.")
             for message in fail_messages:
