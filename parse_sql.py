@@ -16,9 +16,37 @@ from sqlglot import expressions as exp
 DEFAULT_MAX_CHARS = 1000
 DEFAULT_DIALECT = "oracle"
 
-PH_PATTERNS = [
-    re.compile(r"#([A-Za-z0-9_]+)#"),
+# (A) MyBatis 바인딩 / 치환
+RE_MYBATIS_BIND = re.compile(r"#\{[^}]*\}")   # #{...}
+RE_MYBATIS_DOLLAR = re.compile(r"\$\{[^}]*\}")  # ${...}  (필요하면 활성화)
+
+# (B) 기존 #VAR# 토큰
+RE_HASH_VAR = re.compile(r"#([A-Za-z0-9_]+)#")
+
+# (C) MyBatis XML 동적 태그들: <if>, </if>, <foreach ...>, </foreach>, ...
+#     - SQL의 <> 비교와 충돌하지 않도록 "알려진 태그명"만 매칭
+MYBATIS_TAGS = [
+    "if", "choose", "when", "otherwise",
+    "where", "set", "trim", "foreach",
+    "bind", "include", "sql", "selectKey",
+    # mapper 상단에서 나올 수 있는 것들(있어도 안전)
+    "select", "insert", "update", "delete",
 ]
+RE_MYBATIS_XML_TAG = re.compile(
+    rf"</?\s*(?:{'|'.join(MYBATIS_TAGS)})\b[^>]*?>",
+    re.IGNORECASE
+)
+
+# (D) CDATA도 만약 섞여있으면 파싱 깨질 수 있음
+RE_CDATA_OPEN = re.compile(r"<!\[CDATA\[", re.IGNORECASE)
+RE_CDATA_CLOSE = re.compile(r"\]\]>")
+
+# (E) 유니코드 연산자 (>=, <=, <> 로 치환 + 주석 마커로 원복 가능하게)
+UNICODE_OPS = {
+    "≥": ">=",
+    "≤": "<=",
+    "≠": "<>",
+}
 
 
 # -----------------------------
@@ -37,29 +65,112 @@ class SQLPart:
 # -----------------------------
 # Placeholder mask / unmask
 # -----------------------------
-def mask_placeholders(sql: str, patterns: List[re.Pattern]) -> Tuple[str, Dict[str, str]]:
+def mask_placeholders(sql: str) -> Tuple[str, Dict[str, str]]:
+    """
+    아래 항목을 모두 '파싱 안전' 형태로 치환:
+      1) MyBatis XML 동적 태그(<if> 등) -> /*__MBTAG__...__*/ (SQL 주석)
+      2) CDATA -> /*__CDATA__...__*/ (SQL 주석)
+      3) 유니코드 연산자(≥/≤/≠) -> >=/*__UOP__*/ (ASCII 연산자 + 주석)
+      4) MyBatis #{...}, ${...}, #VAR# -> '__PH__...__' (문자열 리터럴)
+
+    반환 mapping은 replacement -> original 로 저장되어 unmask로 원복 가능.
+    """
     run_id = uuid.uuid4().hex
     mapping: Dict[str, str] = {}
     counter = 0
 
-    def make_replacement(i: int) -> str:
-        return f"'__PH__{run_id}__{i}__'"
+    def new_comment_marker(prefix: str) -> str:
+        nonlocal counter
+        marker = f"/*__{prefix}__{run_id}__{counter}__*/"
+        counter += 1
+        return marker
+
+    def new_string_marker() -> str:
+        nonlocal counter
+        marker = f"'__PH__{run_id}__{counter}__'"
+        counter += 1
+        return marker
 
     masked = sql
-    for pat in patterns:
-        def repl(m):
-            nonlocal counter
-            original = m.group(0)
-            replacement = make_replacement(counter)
-            mapping[replacement] = original
-            counter += 1
-            return replacement
-        masked = pat.sub(repl, masked)
+
+    # 1) MyBatis XML 태그: 주석으로 치환 (문자열리터럴로 넣으면 SQL 구문을 깨기 쉬움)
+    def repl_xml(m: re.Match) -> str:
+        original = m.group(0)
+        marker = new_comment_marker("MBTAG")
+        mapping[marker] = original
+        return marker
+
+    masked = RE_MYBATIS_XML_TAG.sub(repl_xml, masked)
+
+    # 2) CDATA 처리
+    def repl_cdata_open(m: re.Match) -> str:
+        original = m.group(0)
+        marker = new_comment_marker("CDATA_OPEN")
+        mapping[marker] = original
+        return marker
+
+    def repl_cdata_close(m: re.Match) -> str:
+        original = m.group(0)
+        marker = new_comment_marker("CDATA_CLOSE")
+        mapping[marker] = original
+        return marker
+
+    masked = RE_CDATA_OPEN.sub(repl_cdata_open, masked)
+    masked = RE_CDATA_CLOSE.sub(repl_cdata_close, masked)
+
+    # 3) 유니코드 연산자: ASCII 연산자 + 주석 마커로 바꿔서 파서가 인식하게 만들고 원복도 가능하게
+    #    예: ≥  -> >=/*__UOP__...__*/   (unmask 시 이 전체 문자열을 ≥로 되돌림)
+    for uop, ascii_op in UNICODE_OPS.items():
+        if uop in masked:
+            # 각 등장마다 다른 marker를 부여해야 정확히 원복됨
+            parts = masked.split(uop)
+            if len(parts) > 1:
+                rebuilt = [parts[0]]
+                for _ in range(len(parts) - 1):
+                    marker = new_comment_marker("UOP")
+                    replacement = f"{ascii_op}{marker}"
+                    mapping[replacement] = uop
+                    rebuilt.append(replacement)
+                    rebuilt.append(parts[len(rebuilt)//2] if False else "")  # placeholder, not used
+                # 위 방식은 리스트 관리가 지저분하므로 안전하게 재구성
+                # -> 아래에서 더 깔끔하게 재구성
+                pass
+
+    # 깔끔한 방식으로 재구성 (유니코드 연산자별로 정규식 치환)
+    def replace_unicode_op(text: str, uop: str, ascii_op: str) -> str:
+        # uop를 하나씩 치환하면서 mapping을 쌓는다
+        while uop in text:
+            marker = new_comment_marker("UOP")
+            replacement = f"{ascii_op}{marker}"
+            mapping[replacement] = uop
+            text = text.replace(uop, replacement, 1)
+        return text
+
+    for uop, ascii_op in UNICODE_OPS.items():
+        masked = replace_unicode_op(masked, uop, ascii_op)
+
+    # 4) MyBatis #{...} / ${...} / #VAR#: 문자열 리터럴로 치환
+    #    - 파싱 목적이므로 값이 뭔지 중요하지 않다(원복은 mapping으로)
+    def repl_stringish(m: re.Match) -> str:
+        original = m.group(0)
+        marker = new_string_marker()
+        mapping[marker] = original
+        return marker
+
+    # #{...} 먼저
+    masked = RE_MYBATIS_BIND.sub(repl_stringish, masked)
+
+    # ${...} 도 쓰면 활성화 (원하면 아래 주석 해제)
+    masked = RE_MYBATIS_DOLLAR.sub(repl_stringish, masked)
+
+    # #VAR#
+    masked = RE_HASH_VAR.sub(repl_stringish, masked)
 
     return masked, mapping
 
 
 def unmask_placeholders(sql: str, mapping: Dict[str, str]) -> str:
+    # 긴 replacement부터 치환(부분 겹침 방지)
     for replacement in sorted(mapping.keys(), key=len, reverse=True):
         sql = sql.replace(replacement, mapping[replacement])
     return sql
@@ -81,7 +192,6 @@ def to_sql(node: exp.Expression, dialect: str) -> str:
 
 
 def _get_query_expr(stmt: exp.Expression) -> Optional[exp.Expression]:
-    # INSERT ... SELECT 지원
     if isinstance(stmt, exp.Insert):
         return stmt.args.get("expression")
     if isinstance(stmt, (exp.Select, exp.Union, exp.With)):
@@ -120,13 +230,11 @@ def _make_identifier(name: str) -> exp.Identifier:
 def _make_table(name: str, alias: Optional[str] = None) -> exp.Expression:
     t = exp.Table(this=_make_identifier(name))
     if alias:
-        # FROM cte_name AS Z  (Oracle에서 AS 생략될 수 있음)
         t = t.as_(alias)
     return t
 
 
 def _extract_alias_from_tablealias(table_alias: Optional[exp.Expression]) -> Optional[str]:
-    # Subquery.alias is TableAlias(this=Identifier("Z")) 형태가 흔함
     if isinstance(table_alias, exp.TableAlias):
         ident = table_alias.args.get("this")
         if isinstance(ident, exp.Identifier):
@@ -135,11 +243,6 @@ def _extract_alias_from_tablealias(table_alias: Optional[exp.Expression]) -> Opt
 
 
 def _derived_info(node: exp.Expression) -> Optional[Tuple[exp.Expression, Optional[str]]]:
-    """
-    FROM/JOIN의 derived table 서브쿼리 감지.
-    대표적으로:
-      - Subquery(this=<Select/Union/...>, alias=TableAlias(Z))
-    """
     if isinstance(node, exp.Subquery) and isinstance(node.args.get("this"), exp.Expression):
         inner = node.args["this"]
         alias_name = _extract_alias_from_tablealias(node.args.get("alias"))
@@ -148,9 +251,6 @@ def _derived_info(node: exp.Expression) -> Optional[Tuple[exp.Expression, Option
 
 
 def _replace_child_in_parent(parent: exp.Expression, old: exp.Expression, new: exp.Expression) -> bool:
-    """
-    transform() 대신 부모의 args를 직접 수정해서 교체
-    """
     for k, v in parent.args.items():
         if v is old:
             parent.set(k, new)
@@ -174,7 +274,6 @@ def split_long_statement_by_from_join_derived_tables(
     max_chars: int,
     min_depth_to_extract: int = 0,
 ) -> SQLPart:
-    # original masked SQL (참고용)
     original_sql_masked = normalize_sql(to_sql(stmt, dialect=dialect)) + ";"
 
     if len(normalize_sql(original_sql_masked)) < max_chars:
@@ -187,7 +286,6 @@ def split_long_statement_by_from_join_derived_tables(
             placeholder_map=placeholder_map,
         )
 
-    # copy는 하되, 이후 교체는 in-place로 수행
     stmt2 = stmt.copy()
     query_expr = _get_query_expr(stmt2)
     if query_expr is None:
@@ -200,7 +298,6 @@ def split_long_statement_by_from_join_derived_tables(
             placeholder_map=placeholder_map,
         )
 
-    # 타깃 수집: (node, parent, depth, inner_q, alias_name)
     targets: List[Tuple[exp.Expression, exp.Expression, int, exp.Expression, Optional[str]]] = []
     for node, depth, parent in traverse_with_depth(query_expr):
         if depth < min_depth_to_extract:
@@ -224,7 +321,6 @@ def split_long_statement_by_from_join_derived_tables(
             placeholder_map=placeholder_map,
         )
 
-    # 깊은 것부터 (중첩 대비)
     targets.sort(key=lambda t: t[2], reverse=True)
 
     ctes: Dict[str, str] = {}
@@ -238,10 +334,8 @@ def split_long_statement_by_from_join_derived_tables(
             cte_name = _safe_cte_name(alias_name, inner_sql)
         used.add(cte_name.lower())
 
-        # 저장
         ctes[cte_name] = inner_sql + ";"
 
-        # main 치환: FROM cte_name AS Z  (alias 유지)
         replacement = _make_table(cte_name, alias=alias_name)
         replaced = _replace_child_in_parent(parent, node, replacement)
 
@@ -314,15 +408,11 @@ def split_sql_file(
     max_chars: int = DEFAULT_MAX_CHARS,
     min_depth_to_extract: int = 0,
     output_masked: bool = False,
-    placeholder_patterns: Optional[List[re.Pattern]] = None,
 ):
-    if placeholder_patterns is None:
-        placeholder_patterns = PH_PATTERNS
-
     with open(input_path, "r", encoding="utf-8") as f:
         original_text = f.read()
 
-    masked_text, mp = mask_placeholders(original_text, placeholder_patterns)
+    masked_text, mp = mask_placeholders(original_text)
     stmts = parse_statements(masked_text, dialect=dialect)
 
     base = os.path.splitext(os.path.basename(input_path))[0]

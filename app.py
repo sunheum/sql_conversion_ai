@@ -184,22 +184,24 @@ def build_template_excel_bytes() -> bytes:
 
 
 def classify_sql_text(sql_text: str) -> tuple[bool, str]:
-    stripped = sql_text.strip()
-    if not stripped:
-        return False, "empty"
 
-    first_token = stripped.split(maxsplit=1)[0].upper()
-    if first_token in NON_QUERY_KEYWORDS:
-        return False, f"keyword:{first_token}"
+    _MYBATIS_ROUTINE_CALL_RE = re.compile(
+        r"""
+        \{                              # opening '{'
+        [^{}]*?                         # anything (non-greedy), not crossing other braces
+        (?:=\s*)?                       # optional "= " (function style)
+        call\s+                         # "call" keyword
+        [A-Za-z_][\w$]*                 # identifier start
+        (?:\.[A-Za-z_][\w$]*)*          # optional dotted qualifiers
+        \s*\(                           # opening parenthesis of call
+        """,
+        re.IGNORECASE | re.VERBOSE | re.DOTALL,
+    )
+    
+    if _MYBATIS_ROUTINE_CALL_RE.search(sql_text):
+        return False, "routine_call:mybatis"
 
-    if first_token in SUPPORTED_SQL_KEYWORDS:
-        try:
-            statements = sqlglot.parse(stripped, read="oracle")
-            return bool(statements), "parsed"
-        except sqlglot.errors.ParseError:
-            return False, "parse_error"
-
-    return False, f"unsupported:{first_token}"
+    return True, ""
 
 
 def list_sql_files(directory: Path) -> list[Path]:
@@ -220,10 +222,10 @@ def export_xml_directory_to_sql(src_dir: Path, out_dir: Path) -> tuple[int, int]
 
 
 def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str | None, db_port: int | None) -> None:
-    st.subheader("1-1. XML 파일을 SQL 파일로 변환")
+    st.subheader("1. XML to SQL")
     st.caption(f"XML 폴더: `{ORACLE_XML_DIR}` / SQL 출력 폴더: `{EXPORTED_SQL_DIR}`")
 
-    if st.button("xml_to_sql.py 실행"):
+    if st.button("변환 실행"):
         try:
             exported_files, exported_count = export_xml_directory_to_sql(ORACLE_XML_DIR, EXPORTED_SQL_DIR)
         except Exception as exc:  # noqa: BLE001
@@ -233,10 +235,10 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
                 st.warning(f"{ORACLE_XML_DIR} 경로에 XML 파일이 없습니다.")
             else:
                 st.success(
-                    f"xml_to_sql.py 실행 완료: XML {exported_files}개, SQL {exported_count}건을 `{EXPORTED_SQL_DIR}`에 저장했습니다."
+                    f"실행 완료: XML {exported_files}개, SQL {exported_count}건을 `{EXPORTED_SQL_DIR}`에 저장했습니다."
                 )
 
-    st.subheader("1-2. .sql 파일 로드")
+    st.subheader("2. SQL 로드")
     load_method = st.radio(
         "SQL 로드 방식을 선택하세요.",
         ["경로에서 .sql 파일 로드", "DB에서 로드"],
@@ -304,10 +306,10 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
     else:
         st.info("아직 로드된 SQL이 없습니다.")
 
-    st.subheader("1-3. SQL 분할")
-    st.caption("parse_sql.py를 실행하여 ./out_parts/{sql파일명}/ 폴더에 저장합니다.")
+    st.subheader("3. SQL 분할")
+    st.caption("./out_parts/{sql파일명}/ 폴더에 저장합니다.")
 
-    if st.button("로드된 SQL 분할 실행"):
+    if st.button("SQL 분할 실행"):
         sql_items = st.session_state.get("preprocess_sql_only", [])
         if not sql_items:
             st.error("먼저 SQL 파일을 로드하세요.")
