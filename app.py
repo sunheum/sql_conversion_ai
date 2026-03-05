@@ -2,16 +2,42 @@ import io
 import json
 import os
 import re
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import psycopg2
 import requests
+import sqlglot
 import streamlit as st
 from dotenv import load_dotenv
 
+from parse_sql import split_sql_file
+
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
+SUPPORTED_SQL_KEYWORDS = {
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "WITH",
+}
+NON_QUERY_KEYWORDS = {
+    "CREATE",
+    "DECLARE",
+    "BEGIN",
+    "ALTER",
+    "DROP",
+    "GRANT",
+    "REVOKE",
+}
+
+ORACLE_XML_DIR = Path("./data/oracle/")
+EXPORTED_SQL_DIR = Path("./data/oracle/_exported_sql/")
+PARTS_OUT_DIR = Path("./out_parts/")
 
 
 def build_payload(user_input: str) -> dict:
@@ -97,6 +123,17 @@ def fetch_source_rows(connection: psycopg2.extensions.connection) -> pd.DataFram
     )
 
 
+def fetch_sql_text_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
+    return pd.read_sql_query(
+        """
+        SELECT id, COALESCE(sql_modified, sql_src) AS sql_text
+        FROM scai_iv.ais_sql_obj_dtl
+        ORDER BY id
+        """,
+        connection,
+    )
+
+
 def fetch_verify_rows(connection: psycopg2.extensions.connection) -> pd.DataFrame:
     return pd.read_sql_query(
         """
@@ -146,24 +183,158 @@ def build_template_excel_bytes() -> bytes:
     return buffer.getvalue()
 
 
-def main() -> None:
-    load_dotenv()
-    st.set_page_config(page_title="API 호출 데모", page_icon="📝", layout="centered")
-    st.title("📝 SQL Conversion AI")
-    st.write("Oracle SQL을 PostgreSQL로 변환하여 DB에 저장합니다.")
+def classify_sql_text(sql_text: str) -> tuple[bool, str]:
+    stripped = sql_text.strip()
+    if not stripped:
+        return False, "empty"
 
-    api_url = st.text_input("API URL", placeholder="http://localhost:8000/generate")
+    first_token = stripped.split(maxsplit=1)[0].upper()
+    if first_token in NON_QUERY_KEYWORDS:
+        return False, f"keyword:{first_token}"
 
-    st.subheader("DB 접속 정보")
-    db_name = st.text_input("DB 이름", placeholder="scai")
-    db_user = st.text_input("DB 사용자", placeholder="dataware")
-    db_password = st.text_input("DB 비밀번호", type="password", placeholder="••••••••")
-    db_host, db_port = get_db_settings()
-    if db_host and db_port:
-        st.caption(f"DB Host/Port는 .env에서 불러옵니다.")
+    if first_token in SUPPORTED_SQL_KEYWORDS:
+        try:
+            statements = sqlglot.parse(stripped, read="oracle")
+            return bool(statements), "parsed"
+        except sqlglot.errors.ParseError:
+            return False, "parse_error"
+
+    return False, f"unsupported:{first_token}"
+
+
+def list_sql_files(directory: Path) -> list[Path]:
+    if not directory.exists():
+        return []
+    return sorted(path for path in directory.glob("*.sql") if path.is_file())
+
+
+def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str | None, db_port: int | None) -> None:
+    st.subheader("1-1. XML 파일을 SQL 파일로 변환")
+    st.caption(f"XML 폴더: `{ORACLE_XML_DIR}` / SQL 출력 폴더: `{EXPORTED_SQL_DIR}`")
+
+    if st.button("xml_to_sql.py 실행"):
+        EXPORTED_SQL_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            result = subprocess.run(
+                ["python", "xml_to_sql.py"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            st.error("xml_to_sql.py 파일을 찾지 못했습니다.")
+        else:
+            if result.returncode == 0:
+                st.success("xml_to_sql.py 실행이 완료되었습니다.")
+            else:
+                st.error("xml_to_sql.py 실행이 실패했습니다.")
+            if result.stdout:
+                st.code(result.stdout)
+            if result.stderr:
+                st.code(result.stderr)
+
+    st.subheader("1-2. .sql 파일 로드")
+    load_method = st.radio(
+        "SQL 로드 방식을 선택하세요.",
+        ["경로에서 .sql 파일 로드", "DB에서 로드"],
+        horizontal=True,
+        key="preprocess_load_method",
+    )
+
+    loaded_records: list[dict[str, str]] = []
+
+    if load_method == "경로에서 .sql 파일 로드":
+        st.caption(f"대상 경로: `{EXPORTED_SQL_DIR}`")
+        if st.button(".sql 파일 읽기"):
+            sql_files = list_sql_files(EXPORTED_SQL_DIR)
+            if not sql_files:
+                st.warning("읽을 .sql 파일이 없습니다.")
+            else:
+                for path in sql_files:
+                    loaded_records.append({"name": path.name, "sql_text": path.read_text(encoding="utf-8")})
     else:
-        st.warning(".env에서 DB Host/Port를 불러오지 못했습니다. POSTGRES_HOST/POSTGRES_PORT를 확인하세요.")
+        if st.button("DB SQL 로드"):
+            if not db_name or not db_user or not db_password:
+                st.error("DB명/사용자/비밀번호를 입력하세요.")
+            elif not db_host or not db_port:
+                st.error(".env의 POSTGRES_HOST/POSTGRES_PORT 설정을 확인하세요.")
+            else:
+                try:
+                    connection = psycopg2.connect(
+                        host=db_host,
+                        port=db_port,
+                        dbname=db_name,
+                        user=db_user,
+                        password=db_password,
+                    )
+                    sql_df = fetch_sql_text_rows(connection)
+                except psycopg2.Error as exc:
+                    st.error(f"DB 로드 실패: {exc}")
+                finally:
+                    if "connection" in locals():
+                        connection.close()
+                if "sql_df" in locals() and not sql_df.empty:
+                    loaded_records = [
+                        {"name": f"db_row_{row.id}.sql", "sql_text": str(row.sql_text)} for row in sql_df.itertuples(index=False)
+                    ]
 
+    if loaded_records:
+        sql_only: list[dict[str, str]] = []
+        non_sql: list[dict[str, str]] = []
+        for item in loaded_records:
+            is_sql, reason = classify_sql_text(item["sql_text"])
+            if is_sql:
+                sql_only.append(item)
+            else:
+                non_sql.append({"name": item["name"], "reason": reason})
+
+        st.session_state["preprocess_sql_only"] = sql_only
+        st.success(f"로드 완료: 총 {len(loaded_records)}건 / SQL {len(sql_only)}건 / 비SQL {len(non_sql)}건")
+
+        if sql_only:
+            st.dataframe(pd.DataFrame(sql_only), use_container_width=True)
+        if non_sql:
+            st.markdown("**비SQL(제외) 목록**")
+            st.dataframe(pd.DataFrame(non_sql), use_container_width=True)
+    elif "preprocess_sql_only" in st.session_state:
+        st.info(f"현재 로드된 SQL 건수: {len(st.session_state['preprocess_sql_only'])}")
+    else:
+        st.info("아직 로드된 SQL이 없습니다.")
+
+    st.subheader("1-3. SQL 분할")
+    st.caption("parse_sql.py를 실행하여 ./out_parts/{sql파일명}/ 폴더에 저장합니다.")
+
+    if st.button("로드된 SQL 분할 실행"):
+        sql_items = st.session_state.get("preprocess_sql_only", [])
+        if not sql_items:
+            st.error("먼저 SQL 파일을 로드하세요.")
+            return
+
+        PARTS_OUT_DIR.mkdir(parents=True, exist_ok=True)
+        success_count = 0
+        fail_messages: list[str] = []
+
+        for item in sql_items:
+            base_name = Path(item["name"]).stem
+            target_dir = PARTS_OUT_DIR / base_name
+            target_dir.mkdir(parents=True, exist_ok=True)
+            temp_input = target_dir / f"{base_name}.sql"
+            temp_input.write_text(item["sql_text"], encoding="utf-8")
+
+            try:
+                split_sql_file(str(temp_input), str(target_dir), dialect="oracle", max_chars=1000, min_depth_to_extract=2)
+                success_count += 1
+            except Exception as exc:  # noqa: BLE001
+                fail_messages.append(f"{item['name']}: {exc}")
+
+        st.success(f"SQL 분할 완료: {success_count}건")
+        if fail_messages:
+            st.warning("일부 SQL 분할이 실패했습니다.")
+            for message in fail_messages:
+                st.write(f"- {message}")
+
+
+def run_conversion(db_name: str, db_user: str, db_password: str, db_host: str | None, db_port: int | None) -> None:
     st.subheader("변환 SQL 불러오기")
     data_source = st.radio(
         "데이터를 불러올 방법을 선택하세요.",
@@ -272,6 +443,7 @@ def main() -> None:
                         connection.close()
 
     st.subheader("SQL 변환")
+    api_url = st.text_input("API URL", placeholder="http://localhost:8000/generate")
     if st.button("SQL 변환 API 호출하기", type="primary"):
         if not api_url:
             st.error("API URL을 입력하세요.")
@@ -343,6 +515,8 @@ def main() -> None:
         else:
             st.info("저장된 결과가 없습니다.")
 
+
+def run_verification(db_name: str, db_user: str, db_password: str, db_host: str | None, db_port: int | None) -> None:
     st.subheader("SQL 검증")
     verify_api_url = st.text_input("검증 API URL", placeholder="http://localhost:8000/verify")
     if st.button("SQL 검증 API 호출하기", type="primary"):
@@ -421,6 +595,34 @@ def main() -> None:
             st.dataframe(pd.DataFrame(verify_rows), use_container_width=True)
         else:
             st.info("검증 결과가 없습니다.")
+
+
+def main() -> None:
+    load_dotenv()
+    st.set_page_config(page_title="SQL Conversion AI", page_icon="📝", layout="centered")
+    st.title("📝 SQL Conversion AI")
+    st.write("전처리, 변환, 검증 메뉴를 통해 Oracle SQL 변환 작업을 수행합니다.")
+
+    st.subheader("공통 DB 접속 정보")
+    db_name = st.text_input("DB 이름", placeholder="scai")
+    db_user = st.text_input("DB 사용자", placeholder="dataware")
+    db_password = st.text_input("DB 비밀번호", type="password", placeholder="••••••••")
+    db_host, db_port = get_db_settings()
+    if db_host and db_port:
+        st.caption("DB Host/Port는 .env에서 불러옵니다.")
+    else:
+        st.warning(".env에서 DB Host/Port를 불러오지 못했습니다. POSTGRES_HOST/POSTGRES_PORT를 확인하세요.")
+
+    tab_preprocess, tab_convert, tab_verify = st.tabs(["전처리", "변환", "검증"])
+
+    with tab_preprocess:
+        run_preprocessing(db_name, db_user, db_password, db_host, db_port)
+
+    with tab_convert:
+        run_conversion(db_name, db_user, db_password, db_host, db_port)
+
+    with tab_verify:
+        run_verification(db_name, db_user, db_password, db_host, db_port)
 
 
 if __name__ == "__main__":
