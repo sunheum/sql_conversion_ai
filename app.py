@@ -184,22 +184,13 @@ def build_template_excel_bytes() -> bytes:
 
 
 def classify_sql_text(sql_text: str) -> tuple[bool, str]:
+    mybatis_call_block_pattern = re.compile(r"\{[\s\S]*?\bcall\b[\s\S]*?\}", re.IGNORECASE)
+    mybatis_placeholder_pattern = re.compile(r"#\{[^{}]+\}")
 
-    _MYBATIS_ROUTINE_CALL_RE = re.compile(
-        r"""
-        \{                              # opening '{'
-        [^{}]*?                         # anything (non-greedy), not crossing other braces
-        (?:=\s*)?                       # optional "= " (function style)
-        call\s+                         # "call" keyword
-        [A-Za-z_][\w$]*                 # identifier start
-        (?:\.[A-Za-z_][\w$]*)*          # optional dotted qualifiers
-        \s*\(                           # opening parenthesis of call
-        """,
-        re.IGNORECASE | re.VERBOSE | re.DOTALL,
-    )
-    
-    if _MYBATIS_ROUTINE_CALL_RE.search(sql_text):
-        return False, "routine_call:mybatis"
+    for match in mybatis_call_block_pattern.finditer(sql_text):
+        call_block = match.group(0)
+        if mybatis_placeholder_pattern.search(call_block):
+            return False, "routine_call:mybatis"
 
     return True, ""
 
