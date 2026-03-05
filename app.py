@@ -13,7 +13,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from parse_sql import split_sql_file
-from xml_to_sql import export_xml_to_sql
+from xml_to_sql import export_from_xml_file
 
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
@@ -208,19 +208,33 @@ def list_sql_files(directory: Path) -> list[Path]:
     return sorted(path for path in directory.glob("*.sql") if path.is_file())
 
 
+def export_xml_directory_to_sql(src_dir: Path, out_dir: Path) -> tuple[int, int]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    xml_files = sorted(src_dir.glob("*.xml"))
+
+    exported_count = 0
+    for xml_path in xml_files:
+        exported_count += export_from_xml_file(xml_path, out_dir)
+
+    return len(xml_files), exported_count
+
+
 def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str | None, db_port: int | None) -> None:
     st.subheader("1-1. XML 파일을 SQL 파일로 변환")
     st.caption(f"XML 폴더: `{ORACLE_XML_DIR}` / SQL 출력 폴더: `{EXPORTED_SQL_DIR}`")
 
     if st.button("xml_to_sql.py 실행"):
         try:
-            exported_files, exported_count = export_xml_to_sql(ORACLE_XML_DIR, EXPORTED_SQL_DIR)
+            exported_files, exported_count = export_xml_directory_to_sql(ORACLE_XML_DIR, EXPORTED_SQL_DIR)
         except Exception as exc:  # noqa: BLE001
             st.error(f"xml_to_sql.py 실행이 실패했습니다: {exc}")
         else:
-            st.success(
-                f"xml_to_sql.py 실행 완료: XML {exported_files}개, SQL {exported_count}건을 `{EXPORTED_SQL_DIR}`에 저장했습니다."
-            )
+            if exported_files == 0:
+                st.warning(f"{ORACLE_XML_DIR} 경로에 XML 파일이 없습니다.")
+            else:
+                st.success(
+                    f"xml_to_sql.py 실행 완료: XML {exported_files}개, SQL {exported_count}건을 `{EXPORTED_SQL_DIR}`에 저장했습니다."
+                )
 
     st.subheader("1-2. .sql 파일 로드")
     load_method = st.radio(
