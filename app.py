@@ -2,7 +2,6 @@ import io
 import json
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +13,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from parse_sql import split_sql_file
+from xml_to_sql import export_xml_to_sql
 
 
 REQUIRED_COLUMNS = ["sql_src", "sql_length", "sql_modified"]
@@ -213,25 +213,14 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
     st.caption(f"XML 폴더: `{ORACLE_XML_DIR}` / SQL 출력 폴더: `{EXPORTED_SQL_DIR}`")
 
     if st.button("xml_to_sql.py 실행"):
-        EXPORTED_SQL_DIR.mkdir(parents=True, exist_ok=True)
         try:
-            result = subprocess.run(
-                ["python", "xml_to_sql.py"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            st.error("xml_to_sql.py 파일을 찾지 못했습니다.")
+            exported_files, exported_count = export_xml_to_sql(ORACLE_XML_DIR, EXPORTED_SQL_DIR)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"xml_to_sql.py 실행이 실패했습니다: {exc}")
         else:
-            if result.returncode == 0:
-                st.success("xml_to_sql.py 실행이 완료되었습니다.")
-            else:
-                st.error("xml_to_sql.py 실행이 실패했습니다.")
-            if result.stdout:
-                st.code(result.stdout)
-            if result.stderr:
-                st.code(result.stderr)
+            st.success(
+                f"xml_to_sql.py 실행 완료: XML {exported_files}개, SQL {exported_count}건을 `{EXPORTED_SQL_DIR}`에 저장했습니다."
+            )
 
     st.subheader("1-2. .sql 파일 로드")
     load_method = st.radio(
