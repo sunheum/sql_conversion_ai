@@ -185,6 +185,12 @@ def build_template_excel_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def build_excel_bytes(dataframe: pd.DataFrame) -> bytes:
+    buffer = io.BytesIO()
+    dataframe.to_excel(buffer, index=False)
+    return buffer.getvalue()
+
+
 def classify_sql_text(sql_text: str) -> tuple[bool, str]:
     mybatis_call_block_pattern = re.compile(r"\{[\s\S]*?\bcall\b[\s\S]*?\}", re.IGNORECASE)
     mybatis_placeholder_pattern = re.compile(r"#\{[^{}]+\}")
@@ -312,7 +318,7 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
         success_count = 0
         split_count = 0
         single_file_count = 0
-        fail_messages: list[str] = []
+        fail_rows: list[dict[str, str]] = []
 
         for item in sql_items:
             base_name = Path(item["name"]).stem
@@ -343,15 +349,26 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
                     single_file_count += 1
                 success_count += 1
             except Exception as exc:  # noqa: BLE001
-                fail_messages.append(f"{item['name']}: {exc}")
+                fail_rows.append(
+                    {
+                        "파일명": item["name"],
+                        "에러메시지": str(exc),
+                    }
+                )
 
         st.success(
             f"SQL 분할 완료: {success_count}건 (분할 저장 {split_count}건 / 단일 파일 저장 {single_file_count}건)"
         )
-        if fail_messages:
+        if fail_rows:
+            fail_df = pd.DataFrame(fail_rows)
             st.warning("일부 SQL 분할이 실패했습니다.")
-            for message in fail_messages:
-                st.write(f"- {message}")
+            st.dataframe(fail_df, use_container_width=True)
+            st.download_button(
+                label="SQL 분할 실패 내역 엑셀 다운로드",
+                data=build_excel_bytes(fail_df),
+                file_name="sql_split_failures.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
 
 def run_conversion(db_name: str, db_user: str, db_password: str, db_host: str | None, db_port: int | None) -> None:
