@@ -312,6 +312,7 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
         success_count = 0
         split_count = 0
         single_file_count = 0
+        split_file_rows: list[dict[str, int | str]] = []
         fail_rows: list[dict[str, str]] = []
 
         for item in sql_items:
@@ -336,6 +337,15 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
                         )
                     finally:
                         Path(temp_input_path).unlink(missing_ok=True)
+
+                    split_output_count = len(list(target_dir.glob("*.sql")))
+                    split_file_rows.append(
+                        {
+                            "파일명": item["name"],
+                            "글자수": len(sql_text),
+                            "분할파일수": split_output_count,
+                        }
+                    )
                     split_count += 1
                 else:
                     single_output_path = target_dir / f"{base_name}.sql"
@@ -353,6 +363,9 @@ def run_preprocessing(db_name: str, db_user: str, db_password: str, db_host: str
         st.success(
             f"SQL 분할 완료: {success_count}건 (분할 저장 {split_count}건 / 단일 파일 저장 {single_file_count}건)"
         )
+        if split_file_rows:
+            st.markdown("**분할 저장 파일 정보**")
+            st.dataframe(pd.DataFrame(split_file_rows), use_container_width=True)
         if fail_rows:
             fail_df = pd.DataFrame(fail_rows)
             st.warning("일부 SQL 분할이 실패했습니다.")
