@@ -8,6 +8,7 @@ from typing import List, Dict, Optional, Tuple
 
 import sqlglot
 from sqlglot import expressions as exp
+from sqlglot.errors import ParseError
 
 
 # -----------------------------
@@ -185,6 +186,142 @@ def normalize_sql(s: str) -> str:
 
 def parse_statements(sql_text: str, dialect: str) -> List[exp.Expression]:
     return sqlglot.parse(sql_text, read=dialect)
+
+
+def split_statements_loose(sql_text: str) -> List[str]:
+    """세미콜론 기반으로 문장을 느슨하게 분리한다(문자열 리터럴은 보존)."""
+    parts: List[str] = []
+    buf: List[str] = []
+    in_single = False
+    in_double = False
+
+    i = 0
+    while i < len(sql_text):
+        ch = sql_text[i]
+        nxt = sql_text[i + 1] if i + 1 < len(sql_text) else ""
+
+        if ch == "'" and not in_double:
+            if in_single and nxt == "'":
+                buf.append(ch)
+                buf.append(nxt)
+                i += 2
+                continue
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == ";" and not in_single and not in_double:
+            stmt = "".join(buf).strip()
+            if stmt:
+                parts.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _replace_nth_keyword(sql: str, keyword: str, replacement: str) -> str:
+    pat = re.compile(rf"\b{re.escape(keyword)}\b", re.IGNORECASE)
+    seen = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal seen
+        seen += 1
+        return m.group(0) if seen == 1 else replacement
+
+    return pat.sub(repl, sql)
+
+
+def _collapse_multiple_keywords(sql: str) -> str:
+    # WHERE 중복은 AND로 연결
+    sql = _replace_nth_keyword(sql, "WHERE", " AND ")
+    # ORDER BY / WITH / 계층형 절은 첫 번째만 유지
+    for kw in ["ORDER BY", "WITH", "CONNECT BY", "START WITH"]:
+        pat = re.compile(rf"\b{kw}\b", re.IGNORECASE)
+        matches = list(pat.finditer(sql))
+        if len(matches) > 1:
+            first_end = matches[0].end()
+            rest = sql[first_end:]
+            rest = pat.sub(" ", rest)
+            sql = sql[:first_end] + rest
+    return sql
+
+
+def _sanitize_oracle_specific(sql: str) -> str:
+    # LISTAGG WITHIN GROUP / DECODE는 파싱 목적상 더미 표현식으로 치환
+    sql = re.sub(
+        r"LISTAGG\s*\([^)]*\)\s*WITHIN\s+GROUP\s*\([^)]*\)",
+        "'__LISTAGG_PLACEHOLDER__'",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    sql = re.sub(r"DECODE\s*\([^)]*\)", "'__DECODE_PLACEHOLDER__'", sql, flags=re.IGNORECASE | re.DOTALL)
+    # FROM 다음에 UNION이 바로 오는 비정상 케이스 방어
+    sql = re.sub(r"\bFROM\s+UNION\b", "FROM (SELECT 1 FROM DUAL) UNION", sql, flags=re.IGNORECASE)
+    return sql
+
+
+def _fix_parentheses(sql: str) -> str:
+    open_count = sql.count("(")
+    close_count = sql.count(")")
+    if open_count > close_count:
+        sql += ")" * (open_count - close_count)
+    elif close_count > open_count:
+        diff = close_count - open_count
+        while diff > 0 and ")" in sql:
+            idx = sql.rfind(")")
+            sql = sql[:idx] + " " + sql[idx + 1:]
+            diff -= 1
+    return sql
+
+
+def _is_unsupported_block(stmt: str) -> bool:
+    head = stmt.strip().upper()
+    return head.startswith("DECLARE") or head.startswith("BEGIN") or head.startswith("MERGE")
+
+
+def parse_statement_with_recovery(sql_text: str, dialect: str) -> Tuple[Optional[exp.Expression], Optional[str]]:
+    if _is_unsupported_block(sql_text):
+        return None, "unsupported_oracle_block"
+
+    candidate = sql_text
+    for _ in range(5):
+        try:
+            parsed = sqlglot.parse_one(candidate, read=dialect)
+            return parsed, None
+        except ParseError as e:
+            msg = str(e).upper()
+            if "MULTIPLE 'WHERE'" in msg or "MULTIPLE 'ORDER BY'" in msg or "MULTIPLE 'WITH'" in msg or "MULTIPLE 'CONNECT BY'" in msg or "MULTIPLE 'START WITH'" in msg:
+                candidate = _collapse_multiple_keywords(candidate)
+            elif "EXPECTING )" in msg or "REQUIRED KEYWORD MISSING" in msg:
+                candidate = _sanitize_oracle_specific(_fix_parentheses(candidate))
+            elif "FAILED TO PARSE ANY STATEMENT FOLLOWING CTE" in msg:
+                if re.match(r"\s*WITH\b", candidate, re.IGNORECASE) and not re.search(r"\b(SELECT|INSERT|UPDATE|DELETE)\b", candidate, re.IGNORECASE):
+                    candidate = f"{candidate} SELECT 1 FROM DUAL"
+                else:
+                    candidate = _fix_parentheses(candidate)
+            elif "EXPECTED TABLE NAME" in msg:
+                candidate = _sanitize_oracle_specific(candidate)
+            elif "ERROR TOKENIZING" in msg or "INVALID EXPRESSION" in msg or "UNEXPECTED TOKEN" in msg:
+                candidate = _sanitize_oracle_specific(_collapse_multiple_keywords(candidate))
+            else:
+                candidate = _fix_parentheses(_sanitize_oracle_specific(candidate))
+
+    return None, "parse_failed_after_recovery"
 
 
 def to_sql(node: exp.Expression, dialect: str) -> str:
@@ -413,14 +550,29 @@ def split_sql_file(
         original_text = f.read()
 
     masked_text, mp = mask_placeholders(original_text)
-    stmts = parse_statements(masked_text, dialect=dialect)
+    raw_stmts = split_statements_loose(masked_text)
 
     base = os.path.splitext(os.path.basename(input_path))[0]
     parts: List[SQLPart] = []
-    for i, stmt in enumerate(stmts, start=1):
+    for i, raw_stmt in enumerate(raw_stmts, start=1):
+        stmt_expr, parse_reason = parse_statement_with_recovery(raw_stmt, dialect=dialect)
+        if stmt_expr is None:
+            raw_masked = normalize_sql(raw_stmt) + ";"
+            parts.append(
+                SQLPart(
+                    statement_index=i,
+                    original_sql=raw_masked,
+                    main_sql=raw_masked,
+                    ctes={},
+                    meta={"split": False, "reason": parse_reason or "parse_failed", "extracted": []},
+                    placeholder_map=mp,
+                )
+            )
+            continue
+
         parts.append(
             split_long_statement_by_from_join_derived_tables(
-                stmt=stmt,
+                stmt=stmt_expr,
                 statement_index=i,
                 placeholder_map=mp,
                 dialect=dialect,
