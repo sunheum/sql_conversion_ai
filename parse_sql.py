@@ -289,92 +289,6 @@ def _classify_sql_risk(sql: str) -> Optional[str]:
     return None
 
 
-def _replace_repeated_keyword(sql: str, keyword_pattern: str, replace_after_first: str) -> str:
-    pattern = re.compile(keyword_pattern, re.IGNORECASE)
-    seen = 0
-
-    def repl(m: re.Match) -> str:
-        nonlocal seen
-        seen += 1
-        if seen == 1:
-            return m.group(0)
-        return replace_after_first
-
-    return pattern.sub(repl, sql)
-
-
-def _strip_block_and_line_comments(sql: str) -> str:
-    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
-    sql = re.sub(r"--[^\n]*", " ", sql)
-    return sql
-
-
-def _mask_problem_functions(sql: str) -> str:
-    # LISTAGG ... WITHIN GROUP / DECODE 등 괄호 파싱 이슈를 피하기 위해 함수 호출을 NULL로 마스킹
-    sql = re.sub(
-        r"\bLISTAGG\s*\(.*?\)\s*WITHIN\s+GROUP\s*\(.*?\)",
-        "NULL",
-        sql,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    sql = re.sub(r"\bDECODE\s*\((?:[^)(]+|\([^)(]*\))*\)", "NULL", sql, flags=re.IGNORECASE)
-    return sql
-
-
-def _recover_sql_for_parse(candidate: str, err_msg: str) -> Tuple[Optional[str], Optional[str]]:
-    risk = _classify_sql_risk(candidate)
-    if risk in {
-        "unsupported_plsql_block",
-        "cte_without_main_statement",
-        "expected_table_name_but_keyword",
-        "unbalanced_parentheses_or_braces",
-    }:
-        return None, risk
-
-    healed = candidate
-
-    if "Found multiple 'WHERE' clauses" in err_msg:
-        healed = _replace_repeated_keyword(healed, r"\bWHERE\b", " AND ")
-    if "Found multiple 'ORDER BY' clauses" in err_msg:
-        healed = _replace_repeated_keyword(healed, r"\bORDER\s+BY\b", ", ")
-    if "Found multiple 'WITH' clauses" in err_msg:
-        healed = _replace_repeated_keyword(healed, r"\bWITH\b", ", ")
-    if "Found multiple 'CONNECT BY' clauses" in err_msg:
-        healed = _replace_repeated_keyword(healed, r"\bCONNECT\s+BY\b", " AND ")
-    if "Found multiple 'START WITH' clauses" in err_msg:
-        healed = _replace_repeated_keyword(healed, r"\bSTART\s+WITH\b", " AND ")
-
-    if "Expecting )" in err_msg and re.search(r"LISTAGG|DECODE", healed, flags=re.IGNORECASE):
-        healed = _mask_problem_functions(healed)
-
-    if "Error tokenizing" in err_msg:
-        healed = _strip_block_and_line_comments(healed)
-
-    if _has_unbalanced_pairs(healed):
-        return None, "unbalanced_parentheses_or_braces"
-
-    return healed, None
-
-
-def _reason_from_error(candidate: str, err_msg: str) -> str:
-    risk = _classify_sql_risk(candidate)
-    if risk:
-        return risk
-    if re.search(r"LISTAGG|DECODE", candidate, flags=re.IGNORECASE) and "Expecting )" in err_msg:
-        return "unsupported_function_parenthesis_structure"
-    if "Failed to parse any statement following CTE" in err_msg:
-        return "cte_following_statement_parse_failure"
-    if "Expected table name" in err_msg:
-        return "expected_table_name_but_got_keyword"
-    if "Required keyword" in err_msg:
-        return "required_keyword_missing"
-    if "Error tokenizing" in err_msg:
-        return "tokenizing_placeholder_error"
-    if re.search(r"Invalid expression|Unexpected token", err_msg):
-        return "invalid_expression_or_unexpected_token"
-    return "sqlglot_parse_failure"
-
-
 def _part_from_raw(
     sql_masked: str,
     statement_index: int,
@@ -675,29 +589,20 @@ def split_sql_file(
                 )
             except Exception as inner_e:
                 err_msg = str(inner_e)
-                healed_sql, forced_reason = _recover_sql_for_parse(candidate, err_msg)
-
-                if healed_sql and healed_sql != candidate:
-                    try:
-                        reparsed = parse_statements(healed_sql, dialect=dialect)
-                        if reparsed:
-                            stmt = reparsed[0]
-                            recovered_part = split_long_statement_by_from_join_derived_tables(
-                                stmt=stmt,
-                                statement_index=i,
-                                placeholder_map=mp,
-                                dialect=dialect,
-                                max_chars=max_chars,
-                                min_depth_to_extract=min_depth_to_extract,
-                            )
-                            recovered_part.meta["recovered_from_error"] = err_msg
-                            recovered_part.meta["recovery_applied"] = True
-                            parts.append(recovered_part)
-                            continue
-                    except Exception:
-                        pass
-
-                reason = forced_reason or _reason_from_error(candidate, err_msg)
+                if re.search(r"LISTAGG|DECODE", candidate, flags=re.IGNORECASE) and "Expecting )" in err_msg:
+                    reason = "unsupported_function_parenthesis_structure"
+                elif "Failed to parse any statement following CTE" in err_msg:
+                    reason = "cte_following_statement_parse_failure"
+                elif "Expected table name" in err_msg:
+                    reason = "expected_table_name_but_got_keyword"
+                elif "Required keyword" in err_msg:
+                    reason = "required_keyword_missing"
+                elif "Error tokenizing" in err_msg:
+                    reason = "tokenizing_placeholder_error"
+                elif re.search(r"Invalid expression|Unexpected token", err_msg):
+                    reason = "invalid_expression_or_unexpected_token"
+                else:
+                    reason = "sqlglot_parse_failure"
                 parts.append(_part_from_raw(candidate, i, mp, reason=reason, parse_error=err_msg))
 
     write_parts(parts, out_dir=out_dir, base_name=base, output_masked=output_masked)
