@@ -8,6 +8,7 @@ from typing import List, Dict, Optional, Tuple
 
 import sqlglot
 from sqlglot import expressions as exp
+from sqlglot.errors import ParseError
 
 
 # -----------------------------
@@ -185,6 +186,116 @@ def normalize_sql(s: str) -> str:
 
 def parse_statements(sql_text: str, dialect: str) -> List[exp.Expression]:
     return sqlglot.parse(sql_text, read=dialect)
+
+
+def split_sql_text_statements(sql_text: str) -> List[str]:
+    """
+    세미콜론 기준 statement 분리.
+    문자열 리터럴/식별자("...", `...`) 내부의 세미콜론은 무시한다.
+    """
+    statements: List[str] = []
+    buf: List[str] = []
+    in_single = False
+    in_double = False
+    in_backtick = False
+
+    i = 0
+    while i < len(sql_text):
+        ch = sql_text[i]
+
+        if ch == "'" and not in_double and not in_backtick:
+            # Oracle style escaped quote('') 처리
+            if in_single and i + 1 < len(sql_text) and sql_text[i + 1] == "'":
+                buf.append(ch)
+                buf.append(sql_text[i + 1])
+                i += 2
+                continue
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == '"' and not in_single and not in_backtick:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == "`" and not in_single and not in_double:
+            in_backtick = not in_backtick
+            buf.append(ch)
+            i += 1
+            continue
+
+        if ch == ";" and not in_single and not in_double and not in_backtick:
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        statements.append(tail)
+    return statements
+
+
+def _balance_parentheses(sql_text: str) -> str:
+    """단순 괄호 밸런싱(문자열 리터럴 밖 기준)."""
+    in_single = False
+    opens = 0
+    closes = 0
+    i = 0
+    while i < len(sql_text):
+        ch = sql_text[i]
+        if ch == "'":
+            if in_single and i + 1 < len(sql_text) and sql_text[i + 1] == "'":
+                i += 2
+                continue
+            in_single = not in_single
+        elif not in_single:
+            if ch == "(":
+                opens += 1
+            elif ch == ")":
+                closes += 1
+        i += 1
+
+    if opens > closes:
+        return sql_text + (")" * (opens - closes))
+    return sql_text
+
+
+def _is_known_unsupported_oracle_block(sql_text: str) -> bool:
+    head = sql_text.lstrip().upper()
+    return head.startswith(("DECLARE", "BEGIN"))
+
+
+def parse_statement_with_recovery(sql_text: str, dialect: str) -> Tuple[Optional[exp.Expression], Optional[str]]:
+    """
+    sqlglot 파싱 실패 시 일반적으로 실패하는 Oracle 패턴을 완화해 재시도한다.
+    최종 실패하면 (None, reason)을 반환한다.
+    """
+    if _is_known_unsupported_oracle_block(sql_text):
+        return None, "unsupported_plsql_block"
+
+    candidates = [sql_text]
+    balanced = _balance_parentheses(sql_text)
+    if balanced != sql_text:
+        candidates.append(balanced)
+
+    for cand in candidates:
+        try:
+            return sqlglot.parse_one(cand, read=dialect), None
+        except ParseError as e:
+            last_err = str(e)
+        except Exception as e:  # pragma: no cover - 방어적 처리
+            last_err = str(e)
+
+    return None, last_err
 
 
 def to_sql(node: exp.Expression, dialect: str) -> str:
@@ -413,14 +524,29 @@ def split_sql_file(
         original_text = f.read()
 
     masked_text, mp = mask_placeholders(original_text)
-    stmts = parse_statements(masked_text, dialect=dialect)
-
     base = os.path.splitext(os.path.basename(input_path))[0]
     parts: List[SQLPart] = []
-    for i, stmt in enumerate(stmts, start=1):
+
+    raw_statements = split_sql_text_statements(masked_text)
+    for i, raw_stmt in enumerate(raw_statements, start=1):
+        parsed_stmt, err = parse_statement_with_recovery(raw_stmt, dialect=dialect)
+        if parsed_stmt is None:
+            fallback_sql = normalize_sql(raw_stmt) + ";"
+            parts.append(
+                SQLPart(
+                    statement_index=i,
+                    original_sql=fallback_sql,
+                    main_sql=fallback_sql,
+                    ctes={},
+                    meta={"split": False, "reason": "parse_error", "parse_error": err, "extracted": []},
+                    placeholder_map=mp,
+                )
+            )
+            continue
+
         parts.append(
             split_long_statement_by_from_join_derived_tables(
-                stmt=stmt,
+                stmt=parsed_stmt,
                 statement_index=i,
                 placeholder_map=mp,
                 dialect=dialect,
