@@ -4,10 +4,11 @@ import json
 import uuid
 import hashlib
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple, Any
+from typing import List, Dict, Optional, Tuple
 
 import sqlglot
 from sqlglot import expressions as exp
+from sqlglot.errors import ParseError
 
 
 # -----------------------------
@@ -189,126 +190,140 @@ def parse_statements(sql_text: str, dialect: str) -> List[exp.Expression]:
     return sqlglot.parse(sql_text, read=dialect)
 
 
-def split_sql_candidates(sql_text: str) -> List[str]:
-    """세미콜론 기반 statement 분리(문자열/괄호 depth 고려)."""
-    candidates: List[str] = []
+def split_statements_loose(sql_text: str) -> List[str]:
+    """세미콜론 기반으로 문장을 느슨하게 분리한다(문자열 리터럴은 보존)."""
+    parts: List[str] = []
     buf: List[str] = []
-    paren_depth = 0
-    single_quote = False
-    double_quote = False
+    in_single = False
+    in_double = False
 
     i = 0
-    n = len(sql_text)
-    while i < n:
+    while i < len(sql_text):
         ch = sql_text[i]
-        nxt = sql_text[i + 1] if i + 1 < n else ""
+        nxt = sql_text[i + 1] if i + 1 < len(sql_text) else ""
 
-        # 문자열 상태 토글
-        if ch == "'" and not double_quote:
-            if single_quote and nxt == "'":
+        if ch == "'" and not in_double:
+            if in_single and nxt == "'":
                 buf.append(ch)
                 buf.append(nxt)
                 i += 2
                 continue
-            single_quote = not single_quote
-            buf.append(ch)
-            i += 1
-            continue
-        if ch == '"' and not single_quote:
-            double_quote = not double_quote
+            in_single = not in_single
             buf.append(ch)
             i += 1
             continue
 
-        if not single_quote and not double_quote:
-            if ch == "(":
-                paren_depth += 1
-            elif ch == ")" and paren_depth > 0:
-                paren_depth -= 1
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
 
-            if ch == ";" and paren_depth == 0:
-                candidate = "".join(buf).strip()
-                if candidate:
-                    candidates.append(candidate)
-                buf = []
-                i += 1
-                continue
+        if ch == ";" and not in_single and not in_double:
+            stmt = "".join(buf).strip()
+            if stmt:
+                parts.append(stmt)
+            buf = []
+            i += 1
+            continue
 
         buf.append(ch)
         i += 1
 
     tail = "".join(buf).strip()
     if tail:
-        candidates.append(tail)
-
-    return candidates
-
-
-def _keyword_count(sql: str, keyword: str) -> int:
-    return len(re.findall(rf"\b{keyword}\b", sql, flags=re.IGNORECASE))
+        parts.append(tail)
+    return parts
 
 
-def _has_unbalanced_pairs(sql: str) -> bool:
-    pairs = {')': '(', ']': '[', '}': '{'}
-    opens = set(pairs.values())
-    stack: List[str] = []
-    for ch in sql:
-        if ch in opens:
-            stack.append(ch)
-        elif ch in pairs:
-            if not stack or stack[-1] != pairs[ch]:
-                return True
-            stack.pop()
-    return bool(stack)
+def _replace_nth_keyword(sql: str, keyword: str, replacement: str) -> str:
+    pat = re.compile(rf"\b{re.escape(keyword)}\b", re.IGNORECASE)
+    seen = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal seen
+        seen += 1
+        return m.group(0) if seen == 1 else replacement
+
+    return pat.sub(repl, sql)
 
 
-def _classify_sql_risk(sql: str) -> Optional[str]:
-    s = sql.upper()
-
-    if re.search(r"\bDECLARE\b|\bBEGIN\b|\bEND\b|\bEXCEPTION\b", s):
-        return "unsupported_plsql_block"
-
-    if _keyword_count(s, "WHERE") > 1:
-        return "multiple_where_clauses"
-    if _keyword_count(s, "ORDER BY") > 1:
-        return "multiple_order_by_clauses"
-    if _keyword_count(s, "WITH") > 1:
-        return "multiple_with_clauses"
-    if _keyword_count(s, "CONNECT BY") > 1 or _keyword_count(s, "START WITH") > 1:
-        return "multiple_hierarchical_clauses"
-
-    if re.search(r"\bWITH\b", s) and not re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|MERGE)\b", s):
-        return "cte_without_main_statement"
-
-    if re.search(r"\bFROM\s+(UNION|INTERSECT|MINUS|EXCEPT)\b", s):
-        return "expected_table_name_but_keyword"
-
-    if _has_unbalanced_pairs(sql):
-        return "unbalanced_parentheses_or_braces"
-
-    return None
+def _collapse_multiple_keywords(sql: str) -> str:
+    # WHERE 중복은 AND로 연결
+    sql = _replace_nth_keyword(sql, "WHERE", " AND ")
+    # ORDER BY / WITH / 계층형 절은 첫 번째만 유지
+    for kw in ["ORDER BY", "WITH", "CONNECT BY", "START WITH"]:
+        pat = re.compile(rf"\b{kw}\b", re.IGNORECASE)
+        matches = list(pat.finditer(sql))
+        if len(matches) > 1:
+            first_end = matches[0].end()
+            rest = sql[first_end:]
+            rest = pat.sub(" ", rest)
+            sql = sql[:first_end] + rest
+    return sql
 
 
-def _part_from_raw(
-    sql_masked: str,
-    statement_index: int,
-    placeholder_map: Dict[str, str],
-    reason: str,
-    parse_error: Optional[str] = None,
-) -> SQLPart:
-    main_sql = normalize_sql(sql_masked) + ";"
-    meta: Dict[str, Any] = {"split": False, "reason": reason, "extracted": []}
-    if parse_error:
-        meta["parse_error"] = parse_error
-
-    return SQLPart(
-        statement_index=statement_index,
-        original_sql=main_sql,
-        main_sql=main_sql,
-        ctes={},
-        meta=meta,
-        placeholder_map=placeholder_map,
+def _sanitize_oracle_specific(sql: str) -> str:
+    # LISTAGG WITHIN GROUP / DECODE는 파싱 목적상 더미 표현식으로 치환
+    sql = re.sub(
+        r"LISTAGG\s*\([^)]*\)\s*WITHIN\s+GROUP\s*\([^)]*\)",
+        "'__LISTAGG_PLACEHOLDER__'",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
     )
+    sql = re.sub(r"DECODE\s*\([^)]*\)", "'__DECODE_PLACEHOLDER__'", sql, flags=re.IGNORECASE | re.DOTALL)
+    # FROM 다음에 UNION이 바로 오는 비정상 케이스 방어
+    sql = re.sub(r"\bFROM\s+UNION\b", "FROM (SELECT 1 FROM DUAL) UNION", sql, flags=re.IGNORECASE)
+    return sql
+
+
+def _fix_parentheses(sql: str) -> str:
+    open_count = sql.count("(")
+    close_count = sql.count(")")
+    if open_count > close_count:
+        sql += ")" * (open_count - close_count)
+    elif close_count > open_count:
+        diff = close_count - open_count
+        while diff > 0 and ")" in sql:
+            idx = sql.rfind(")")
+            sql = sql[:idx] + " " + sql[idx + 1:]
+            diff -= 1
+    return sql
+
+
+def _is_unsupported_block(stmt: str) -> bool:
+    head = stmt.strip().upper()
+    return head.startswith("DECLARE") or head.startswith("BEGIN") or head.startswith("MERGE")
+
+
+def parse_statement_with_recovery(sql_text: str, dialect: str) -> Tuple[Optional[exp.Expression], Optional[str]]:
+    if _is_unsupported_block(sql_text):
+        return None, "unsupported_oracle_block"
+
+    candidate = sql_text
+    for _ in range(5):
+        try:
+            parsed = sqlglot.parse_one(candidate, read=dialect)
+            return parsed, None
+        except ParseError as e:
+            msg = str(e).upper()
+            if "MULTIPLE 'WHERE'" in msg or "MULTIPLE 'ORDER BY'" in msg or "MULTIPLE 'WITH'" in msg or "MULTIPLE 'CONNECT BY'" in msg or "MULTIPLE 'START WITH'" in msg:
+                candidate = _collapse_multiple_keywords(candidate)
+            elif "EXPECTING )" in msg or "REQUIRED KEYWORD MISSING" in msg:
+                candidate = _sanitize_oracle_specific(_fix_parentheses(candidate))
+            elif "FAILED TO PARSE ANY STATEMENT FOLLOWING CTE" in msg:
+                if re.match(r"\s*WITH\b", candidate, re.IGNORECASE) and not re.search(r"\b(SELECT|INSERT|UPDATE|DELETE)\b", candidate, re.IGNORECASE):
+                    candidate = f"{candidate} SELECT 1 FROM DUAL"
+                else:
+                    candidate = _fix_parentheses(candidate)
+            elif "EXPECTED TABLE NAME" in msg:
+                candidate = _sanitize_oracle_specific(candidate)
+            elif "ERROR TOKENIZING" in msg or "INVALID EXPRESSION" in msg or "UNEXPECTED TOKEN" in msg:
+                candidate = _sanitize_oracle_specific(_collapse_multiple_keywords(candidate))
+            else:
+                candidate = _fix_parentheses(_sanitize_oracle_specific(candidate))
+
+    return None, "parse_failed_after_recovery"
 
 
 def to_sql(node: exp.Expression, dialect: str) -> str:
@@ -548,62 +563,36 @@ def split_sql_file(
         original_text = f.read()
 
     masked_text, mp = mask_placeholders(original_text)
-    parts: List[SQLPart] = []
-    base = os.path.splitext(os.path.basename(input_path))[0]
+    raw_stmts = split_statements_loose(masked_text)
 
-    try:
-        stmts = parse_statements(masked_text, dialect=dialect)
-        for i, stmt in enumerate(stmts, start=1):
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    parts: List[SQLPart] = []
+    for i, raw_stmt in enumerate(raw_stmts, start=1):
+        stmt_expr, parse_reason = parse_statement_with_recovery(raw_stmt, dialect=dialect)
+        if stmt_expr is None:
+            raw_masked = normalize_sql(raw_stmt) + ";"
             parts.append(
-                split_long_statement_by_from_join_derived_tables(
-                    stmt=stmt,
+                SQLPart(
                     statement_index=i,
+                    original_sql=raw_masked,
+                    main_sql=raw_masked,
+                    ctes={},
+                    meta={"split": False, "reason": parse_reason or "parse_failed", "extracted": []},
                     placeholder_map=mp,
-                    dialect=dialect,
-                    max_chars=max_chars,
-                    min_depth_to_extract=min_depth_to_extract,
                 )
             )
-    except Exception as e:
-        candidates = split_sql_candidates(masked_text)
-        for i, candidate in enumerate(candidates, start=1):
-            risk = _classify_sql_risk(candidate)
-            if risk:
-                parts.append(_part_from_raw(candidate, i, mp, reason=risk, parse_error=str(e)))
-                continue
+            continue
 
-            try:
-                parsed = parse_statements(candidate, dialect=dialect)
-                if not parsed:
-                    raise ValueError("No statement parsed from candidate")
-                stmt = parsed[0]
-                parts.append(
-                    split_long_statement_by_from_join_derived_tables(
-                        stmt=stmt,
-                        statement_index=i,
-                        placeholder_map=mp,
-                        dialect=dialect,
-                        max_chars=max_chars,
-                        min_depth_to_extract=min_depth_to_extract,
-                    )
-                )
-            except Exception as inner_e:
-                err_msg = str(inner_e)
-                if re.search(r"LISTAGG|DECODE", candidate, flags=re.IGNORECASE) and "Expecting )" in err_msg:
-                    reason = "unsupported_function_parenthesis_structure"
-                elif "Failed to parse any statement following CTE" in err_msg:
-                    reason = "cte_following_statement_parse_failure"
-                elif "Expected table name" in err_msg:
-                    reason = "expected_table_name_but_got_keyword"
-                elif "Required keyword" in err_msg:
-                    reason = "required_keyword_missing"
-                elif "Error tokenizing" in err_msg:
-                    reason = "tokenizing_placeholder_error"
-                elif re.search(r"Invalid expression|Unexpected token", err_msg):
-                    reason = "invalid_expression_or_unexpected_token"
-                else:
-                    reason = "sqlglot_parse_failure"
-                parts.append(_part_from_raw(candidate, i, mp, reason=reason, parse_error=err_msg))
+        parts.append(
+            split_long_statement_by_from_join_derived_tables(
+                stmt=stmt_expr,
+                statement_index=i,
+                placeholder_map=mp,
+                dialect=dialect,
+                max_chars=max_chars,
+                min_depth_to_extract=min_depth_to_extract,
+            )
+        )
 
     write_parts(parts, out_dir=out_dir, base_name=base, output_masked=output_masked)
 
