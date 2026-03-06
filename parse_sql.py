@@ -4,7 +4,7 @@ import json
 import uuid
 import hashlib
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 
 import sqlglot
 from sqlglot import expressions as exp
@@ -60,6 +60,8 @@ class SQLPart:
     ctes: Dict[str, str]           # masked
     meta: Dict[str, object]
     placeholder_map: Dict[str, str]  # replacement -> original
+
+
 
 
 # -----------------------------
@@ -185,6 +187,214 @@ def normalize_sql(s: str) -> str:
 
 def parse_statements(sql_text: str, dialect: str) -> List[exp.Expression]:
     return sqlglot.parse(sql_text, read=dialect)
+
+
+def split_sql_candidates(sql_text: str) -> List[str]:
+    """세미콜론 기반 statement 분리(문자열/괄호 depth 고려)."""
+    candidates: List[str] = []
+    buf: List[str] = []
+    paren_depth = 0
+    single_quote = False
+    double_quote = False
+
+    i = 0
+    n = len(sql_text)
+    while i < n:
+        ch = sql_text[i]
+        nxt = sql_text[i + 1] if i + 1 < n else ""
+
+        # 문자열 상태 토글
+        if ch == "'" and not double_quote:
+            if single_quote and nxt == "'":
+                buf.append(ch)
+                buf.append(nxt)
+                i += 2
+                continue
+            single_quote = not single_quote
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not single_quote:
+            double_quote = not double_quote
+            buf.append(ch)
+            i += 1
+            continue
+
+        if not single_quote and not double_quote:
+            if ch == "(":
+                paren_depth += 1
+            elif ch == ")" and paren_depth > 0:
+                paren_depth -= 1
+
+            if ch == ";" and paren_depth == 0:
+                candidate = "".join(buf).strip()
+                if candidate:
+                    candidates.append(candidate)
+                buf = []
+                i += 1
+                continue
+
+        buf.append(ch)
+        i += 1
+
+    tail = "".join(buf).strip()
+    if tail:
+        candidates.append(tail)
+
+    return candidates
+
+
+def _keyword_count(sql: str, keyword: str) -> int:
+    return len(re.findall(rf"\b{keyword}\b", sql, flags=re.IGNORECASE))
+
+
+def _has_unbalanced_pairs(sql: str) -> bool:
+    pairs = {')': '(', ']': '[', '}': '{'}
+    opens = set(pairs.values())
+    stack: List[str] = []
+    for ch in sql:
+        if ch in opens:
+            stack.append(ch)
+        elif ch in pairs:
+            if not stack or stack[-1] != pairs[ch]:
+                return True
+            stack.pop()
+    return bool(stack)
+
+
+def _classify_sql_risk(sql: str) -> Optional[str]:
+    s = sql.upper()
+
+    if re.search(r"\bDECLARE\b|\bBEGIN\b|\bEND\b|\bEXCEPTION\b", s):
+        return "unsupported_plsql_block"
+
+    if _keyword_count(s, "WHERE") > 1:
+        return "multiple_where_clauses"
+    if _keyword_count(s, "ORDER BY") > 1:
+        return "multiple_order_by_clauses"
+    if _keyword_count(s, "WITH") > 1:
+        return "multiple_with_clauses"
+    if _keyword_count(s, "CONNECT BY") > 1 or _keyword_count(s, "START WITH") > 1:
+        return "multiple_hierarchical_clauses"
+
+    if re.search(r"\bWITH\b", s) and not re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|MERGE)\b", s):
+        return "cte_without_main_statement"
+
+    if re.search(r"\bFROM\s+(UNION|INTERSECT|MINUS|EXCEPT)\b", s):
+        return "expected_table_name_but_keyword"
+
+    if _has_unbalanced_pairs(sql):
+        return "unbalanced_parentheses_or_braces"
+
+    return None
+
+
+def _replace_repeated_keyword(sql: str, keyword_pattern: str, replace_after_first: str) -> str:
+    pattern = re.compile(keyword_pattern, re.IGNORECASE)
+    seen = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal seen
+        seen += 1
+        if seen == 1:
+            return m.group(0)
+        return replace_after_first
+
+    return pattern.sub(repl, sql)
+
+
+def _strip_block_and_line_comments(sql: str) -> str:
+    sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    sql = re.sub(r"--[^\n]*", " ", sql)
+    return sql
+
+
+def _mask_problem_functions(sql: str) -> str:
+    # LISTAGG ... WITHIN GROUP / DECODE 등 괄호 파싱 이슈를 피하기 위해 함수 호출을 NULL로 마스킹
+    sql = re.sub(
+        r"\bLISTAGG\s*\(.*?\)\s*WITHIN\s+GROUP\s*\(.*?\)",
+        "NULL",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    sql = re.sub(r"\bDECODE\s*\((?:[^)(]+|\([^)(]*\))*\)", "NULL", sql, flags=re.IGNORECASE)
+    return sql
+
+
+def _recover_sql_for_parse(candidate: str, err_msg: str) -> Tuple[Optional[str], Optional[str]]:
+    risk = _classify_sql_risk(candidate)
+    if risk in {
+        "unsupported_plsql_block",
+        "cte_without_main_statement",
+        "expected_table_name_but_keyword",
+        "unbalanced_parentheses_or_braces",
+    }:
+        return None, risk
+
+    healed = candidate
+
+    if "Found multiple 'WHERE' clauses" in err_msg:
+        healed = _replace_repeated_keyword(healed, r"\bWHERE\b", " AND ")
+    if "Found multiple 'ORDER BY' clauses" in err_msg:
+        healed = _replace_repeated_keyword(healed, r"\bORDER\s+BY\b", ", ")
+    if "Found multiple 'WITH' clauses" in err_msg:
+        healed = _replace_repeated_keyword(healed, r"\bWITH\b", ", ")
+    if "Found multiple 'CONNECT BY' clauses" in err_msg:
+        healed = _replace_repeated_keyword(healed, r"\bCONNECT\s+BY\b", " AND ")
+    if "Found multiple 'START WITH' clauses" in err_msg:
+        healed = _replace_repeated_keyword(healed, r"\bSTART\s+WITH\b", " AND ")
+
+    if "Expecting )" in err_msg and re.search(r"LISTAGG|DECODE", healed, flags=re.IGNORECASE):
+        healed = _mask_problem_functions(healed)
+
+    if "Error tokenizing" in err_msg:
+        healed = _strip_block_and_line_comments(healed)
+
+    if _has_unbalanced_pairs(healed):
+        return None, "unbalanced_parentheses_or_braces"
+
+    return healed, None
+
+
+def _reason_from_error(candidate: str, err_msg: str) -> str:
+    risk = _classify_sql_risk(candidate)
+    if risk:
+        return risk
+    if re.search(r"LISTAGG|DECODE", candidate, flags=re.IGNORECASE) and "Expecting )" in err_msg:
+        return "unsupported_function_parenthesis_structure"
+    if "Failed to parse any statement following CTE" in err_msg:
+        return "cte_following_statement_parse_failure"
+    if "Expected table name" in err_msg:
+        return "expected_table_name_but_got_keyword"
+    if "Required keyword" in err_msg:
+        return "required_keyword_missing"
+    if "Error tokenizing" in err_msg:
+        return "tokenizing_placeholder_error"
+    if re.search(r"Invalid expression|Unexpected token", err_msg):
+        return "invalid_expression_or_unexpected_token"
+    return "sqlglot_parse_failure"
+
+
+def _part_from_raw(
+    sql_masked: str,
+    statement_index: int,
+    placeholder_map: Dict[str, str],
+    reason: str,
+    parse_error: Optional[str] = None,
+) -> SQLPart:
+    main_sql = normalize_sql(sql_masked) + ";"
+    meta: Dict[str, Any] = {"split": False, "reason": reason, "extracted": []}
+    if parse_error:
+        meta["parse_error"] = parse_error
+
+    return SQLPart(
+        statement_index=statement_index,
+        original_sql=main_sql,
+        main_sql=main_sql,
+        ctes={},
+        meta=meta,
+        placeholder_map=placeholder_map,
+    )
 
 
 def to_sql(node: exp.Expression, dialect: str) -> str:
@@ -386,11 +596,22 @@ def write_parts(parts: List[SQLPart], out_dir: str, base_name: str, output_maske
                 f.write(maybe_unmask(cte_sql).strip() + "\n")
             cte_files[cte_name] = fn
 
+        config_file = f"{base_name}__{idx}__config.json"
+        config_payload = {
+            "statement_index": p.statement_index,
+            "original_sql": p.original_sql,
+            "placeholder_map": p.placeholder_map,
+            "meta": p.meta,
+        }
+        with open(os.path.join(out_dir, config_file), "w", encoding="utf-8") as f:
+            json.dump(config_payload, f, ensure_ascii=False, indent=2)
+
         manifest.append(
             {
                 "statement_index": p.statement_index,
                 "main_file": main_file,
                 "cte_files": cte_files,
+                "config_file": config_file,
                 "meta": p.meta,
                 "output_masked": output_masked,
             }
@@ -413,21 +634,71 @@ def split_sql_file(
         original_text = f.read()
 
     masked_text, mp = mask_placeholders(original_text)
-    stmts = parse_statements(masked_text, dialect=dialect)
-
-    base = os.path.splitext(os.path.basename(input_path))[0]
     parts: List[SQLPart] = []
-    for i, stmt in enumerate(stmts, start=1):
-        parts.append(
-            split_long_statement_by_from_join_derived_tables(
-                stmt=stmt,
-                statement_index=i,
-                placeholder_map=mp,
-                dialect=dialect,
-                max_chars=max_chars,
-                min_depth_to_extract=min_depth_to_extract,
+    base = os.path.splitext(os.path.basename(input_path))[0]
+
+    try:
+        stmts = parse_statements(masked_text, dialect=dialect)
+        for i, stmt in enumerate(stmts, start=1):
+            parts.append(
+                split_long_statement_by_from_join_derived_tables(
+                    stmt=stmt,
+                    statement_index=i,
+                    placeholder_map=mp,
+                    dialect=dialect,
+                    max_chars=max_chars,
+                    min_depth_to_extract=min_depth_to_extract,
+                )
             )
-        )
+    except Exception as e:
+        candidates = split_sql_candidates(masked_text)
+        for i, candidate in enumerate(candidates, start=1):
+            risk = _classify_sql_risk(candidate)
+            if risk:
+                parts.append(_part_from_raw(candidate, i, mp, reason=risk, parse_error=str(e)))
+                continue
+
+            try:
+                parsed = parse_statements(candidate, dialect=dialect)
+                if not parsed:
+                    raise ValueError("No statement parsed from candidate")
+                stmt = parsed[0]
+                parts.append(
+                    split_long_statement_by_from_join_derived_tables(
+                        stmt=stmt,
+                        statement_index=i,
+                        placeholder_map=mp,
+                        dialect=dialect,
+                        max_chars=max_chars,
+                        min_depth_to_extract=min_depth_to_extract,
+                    )
+                )
+            except Exception as inner_e:
+                err_msg = str(inner_e)
+                healed_sql, forced_reason = _recover_sql_for_parse(candidate, err_msg)
+
+                if healed_sql and healed_sql != candidate:
+                    try:
+                        reparsed = parse_statements(healed_sql, dialect=dialect)
+                        if reparsed:
+                            stmt = reparsed[0]
+                            recovered_part = split_long_statement_by_from_join_derived_tables(
+                                stmt=stmt,
+                                statement_index=i,
+                                placeholder_map=mp,
+                                dialect=dialect,
+                                max_chars=max_chars,
+                                min_depth_to_extract=min_depth_to_extract,
+                            )
+                            recovered_part.meta["recovered_from_error"] = err_msg
+                            recovered_part.meta["recovery_applied"] = True
+                            parts.append(recovered_part)
+                            continue
+                    except Exception:
+                        pass
+
+                reason = forced_reason or _reason_from_error(candidate, err_msg)
+                parts.append(_part_from_raw(candidate, i, mp, reason=reason, parse_error=err_msg))
 
     write_parts(parts, out_dir=out_dir, base_name=base, output_masked=output_masked)
 
